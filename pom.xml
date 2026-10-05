@@ -526,6 +526,69 @@
                                                 "new": "method void org.asynchttpclient.netty.handler.Http2Handler::userEventTriggered(io.netty.channel.ChannelHandlerContext, java.lang.Object) throws java.lang.Exception",
                                                 "annotationType": "io.netty.channel.ChannelHandlerMask.Skip",
                                                 "justification": "Http2Handler overrides userEventTriggered to handle RST_STREAM (Http2ResetFrame); Netty's internal @ChannelHandlerMask.Skip no-op marker is correctly dropped because the method now does real work. Http2Handler is public final and internal-package, so there is no binary, source, or behavioral change for consumers. Scoped to this exact method so any real future change to it is still flagged."
+                                            },
+                                            {
+                                                "code": "java.field.removed",
+                                                "old": "field io.netty.handler.codec.http.HttpContentDecoder.ctx @ org.asynchttpclient.netty.handler.Http1ContentDecompressor",
+                                                "justification": "Http1ContentDecompressor no longer extends Netty's HttpContentDecompressor, which inflates every chunk as soon as it is read and cannot pause; it is now a ChannelDuplexHandler on Netty's pull-based Decompressor that stops while its response is suspended. The class is in the internal handler package and is only instantiated by ChannelManager; its public constructor is unchanged. This member was inherited from Netty's decoder or was one of its hooks."
+                                            },
+                                            {
+                                                "code": "java.method.removed",
+                                                "old": "method boolean io.netty.handler.codec.MessageToMessageDecoder<I>::acceptInboundMessage(java.lang.Object) throws java.lang.Exception @ org.asynchttpclient.netty.handler.Http1ContentDecompressor",
+                                                "justification": "Http1ContentDecompressor no longer extends Netty's HttpContentDecompressor, which inflates every chunk as soon as it is read and cannot pause; it is now a ChannelDuplexHandler on Netty's pull-based Decompressor that stops while its response is suspended. The class is in the internal handler package and is only instantiated by ChannelManager; its public constructor is unchanged. This member was inherited from Netty's decoder or was one of its hooks."
+                                            },
+                                            {
+                                                "code": "java.method.exception.checkedRemoved",
+                                                "old": "method void io.netty.handler.codec.http.HttpContentDecoder::channelInactive(io.netty.channel.ChannelHandlerContext) throws java.lang.Exception @ org.asynchttpclient.netty.handler.Http1ContentDecompressor",
+                                                "new": "method void org.asynchttpclient.netty.handler.Http1ContentDecompressor::channelInactive(io.netty.channel.ChannelHandlerContext)",
+                                                "justification": "Http1ContentDecompressor no longer extends Netty's HttpContentDecompressor, which inflates every chunk as soon as it is read and cannot pause; it is now a ChannelDuplexHandler on Netty's pull-based Decompressor that stops while its response is suspended. The class is in the internal handler package and is only instantiated by ChannelManager; its public constructor is unchanged. This handler method no longer declares checked exceptions; callers are unaffected."
+                                            },
+                                            {
+                                                "code": "java.method.exception.checkedRemoved",
+                                                "old": "method void io.netty.handler.codec.MessageToMessageDecoder<I>::channelRead(io.netty.channel.ChannelHandlerContext, java.lang.Object) throws java.lang.Exception @ org.asynchttpclient.netty.handler.Http1ContentDecompressor",
+                                                "new": "method void org.asynchttpclient.netty.handler.Http1ContentDecompressor::channelRead(io.netty.channel.ChannelHandlerContext, java.lang.Object)",
+                                                "justification": "Http1ContentDecompressor no longer extends Netty's HttpContentDecompressor, which inflates every chunk as soon as it is read and cannot pause; it is now a ChannelDuplexHandler on Netty's pull-based Decompressor that stops while its response is suspended. The class is in the internal handler package and is only instantiated by ChannelManager; its public constructor is unchanged. This handler method no longer declares checked exceptions; callers are unaffected."
+                                            },
+                                            {
+                                                "code": "java.annotation.added",
+                                                "old": "method void io.netty.handler.codec.http.HttpContentDecoder::channelReadComplete(io.netty.channel.ChannelHandlerContext) throws java.lang.Exception @ org.asynchttpclient.netty.handler.Http1ContentDecompressor",
+                                                "new": "method void io.netty.channel.ChannelInboundHandlerAdapter::channelReadComplete(io.netty.channel.ChannelHandlerContext) throws java.lang.Exception @ org.asynchttpclient.netty.handler.Http1ContentDecompressor",
+                                                "annotationType": "io.netty.channel.ChannelHandlerMask.Skip",
+                                                "justification": "Http1ContentDecompressor no longer extends Netty's HttpContentDecompressor, which inflates every chunk as soon as it is read and cannot pause; it is now a ChannelDuplexHandler on Netty's pull-based Decompressor that stops while its response is suspended. The class is in the internal handler package and is only instantiated by ChannelManager; its public constructor is unchanged. Netty's @Skip marker now comes from ChannelInboundHandlerAdapter instead of Netty's decoder; channelReadComplete is passed through as before."
+                                            },
+                                            {
+                                                "code": "java.method.visibilityReduced",
+                                                "old": "method void io.netty.handler.codec.http.HttpContentDecoder::decode(io.netty.channel.ChannelHandlerContext, io.netty.handler.codec.http.HttpObject, java.util.List<java.lang.Object>) throws java.lang.Exception @ org.asynchttpclient.netty.handler.Http1ContentDecompressor",
+                                                "new": "method void org.asynchttpclient.netty.handler.Http1ContentDecompressor::decode(io.netty.handler.codec.http.HttpContent)",
+                                                "justification": "Http1ContentDecompressor no longer extends Netty's HttpContentDecompressor, which inflates every chunk as soon as it is read and cannot pause; it is now a ChannelDuplexHandler on Netty's pull-based Decompressor that stops while its response is suspended. The class is in the internal handler package and is only instantiated by ChannelManager; its public constructor is unchanged. This member was inherited from Netty's decoder or was one of its hooks."
+                                            },
+                                            {
+                                                "code": "java.method.removed",
+                                                "old": "method java.lang.String org.asynchttpclient.netty.handler.Http1ContentDecompressor::getTargetContentEncoding(java.lang.String) throws java.lang.Exception",
+                                                "justification": "Http1ContentDecompressor no longer extends Netty's HttpContentDecompressor, which inflates every chunk as soon as it is read and cannot pause; it is now a ChannelDuplexHandler on Netty's pull-based Decompressor that stops while its response is suspended. The class is in the internal handler package and is only instantiated by ChannelManager; its public constructor is unchanged. This member was inherited from Netty's decoder or was one of its hooks."
+                                            },
+                                            {
+                                                "code": "java.method.exception.checkedRemoved",
+                                                "old": "method void io.netty.handler.codec.http.HttpContentDecoder::handlerRemoved(io.netty.channel.ChannelHandlerContext) throws java.lang.Exception @ org.asynchttpclient.netty.handler.Http1ContentDecompressor",
+                                                "new": "method void org.asynchttpclient.netty.handler.Http1ContentDecompressor::handlerRemoved(io.netty.channel.ChannelHandlerContext)",
+                                                "justification": "Http1ContentDecompressor no longer extends Netty's HttpContentDecompressor, which inflates every chunk as soon as it is read and cannot pause; it is now a ChannelDuplexHandler on Netty's pull-based Decompressor that stops while its response is suspended. The class is in the internal handler package and is only instantiated by ChannelManager; its public constructor is unchanged. This handler method no longer declares checked exceptions; callers are unaffected."
+                                            },
+                                            {
+                                                "code": "java.method.removed",
+                                                "old": "method io.netty.channel.embedded.EmbeddedChannel org.asynchttpclient.netty.handler.Http1ContentDecompressor::newContentDecoder(java.lang.String) throws java.lang.Exception",
+                                                "justification": "Http1ContentDecompressor no longer extends Netty's HttpContentDecompressor, which inflates every chunk as soon as it is read and cannot pause; it is now a ChannelDuplexHandler on Netty's pull-based Decompressor that stops while its response is suspended. The class is in the internal handler package and is only instantiated by ChannelManager; its public constructor is unchanged. This member was inherited from Netty's decoder or was one of its hooks."
+                                            },
+                                            {
+                                                "code": "java.class.noLongerInheritsFromClass",
+                                                "old": "class org.asynchttpclient.netty.handler.Http1ContentDecompressor",
+                                                "new": "class org.asynchttpclient.netty.handler.Http1ContentDecompressor",
+                                                "justification": "Http1ContentDecompressor no longer extends Netty's HttpContentDecompressor, which inflates every chunk as soon as it is read and cannot pause; it is now a ChannelDuplexHandler on Netty's pull-based Decompressor that stops while its response is suspended. The class is in the internal handler package and is only instantiated by ChannelManager; its public constructor is unchanged."
+                                            },
+                                            {
+                                                "code": "java.class.nonFinalClassInheritsFromNewClass",
+                                                "old": "class org.asynchttpclient.netty.handler.Http1ContentDecompressor",
+                                                "new": "class org.asynchttpclient.netty.handler.Http1ContentDecompressor",
+                                                "justification": "Http1ContentDecompressor no longer extends Netty's HttpContentDecompressor, which inflates every chunk as soon as it is read and cannot pause; it is now a ChannelDuplexHandler on Netty's pull-based Decompressor that stops while its response is suspended. The class is in the internal handler package and is only instantiated by ChannelManager; its public constructor is unchanged."
                                             }
                                         ]
                                     }

@@ -470,8 +470,7 @@ public class ChannelManager {
      * The HTTP/1.1 decompressor, bounded so a decompression bomb — a small, highly compressible body that
      * inflates without limit — fails the exchange instead of exhausting the heap. The ceiling comes from
      * {@link AsyncHttpClientConfig#getMaxDecompressedResponseSize()} (256 MiB by default, {@code 0} to
-     * disable); see {@link Http1ContentDecompressor} for why Netty's own {@code maxAllocation} argument
-     * does not provide this.
+     * disable). It also stops inflating while the response is suspended; see {@link Http1ContentDecompressor}.
      */
     private Http1ContentDecompressor newHttpContentDecompressor() {
         return new Http1ContentDecompressor(config.isKeepEncodingHeader(), config.getMaxDecompressedResponseSize());
