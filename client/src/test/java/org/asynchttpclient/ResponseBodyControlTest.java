@@ -57,6 +57,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -181,6 +182,62 @@ public class ResponseBodyControlTest {
             Response pooled = client.prepareGet(url("/pool")).execute().get(5, SECONDS);
             assertEquals("1", pooled.getResponseBody());
             assertEquals(1, connectionCount.get(), "a fully consumed HTTP/1.1 connection must be reused");
+            assertNull(handler.throwable.get());
+        }
+    }
+
+    @Test
+    public void earlierSuspendFromAnotherThreadDoesNotUndoLaterResume() throws Exception {
+        AtomicReference<Channel> clientChannel = new AtomicReference<>();
+        try (AsyncHttpClient client = asyncHttpClient(config()
+                .setRequestTimeout(Duration.ofSeconds(10))
+                .setHttpAdditionalChannelInitializer(clientChannel::set))) {
+            RecordingHandler handler = new RecordingHandler(false);
+            ListenableFuture<RecordingHandler> request = client.prepareGet(url("/controlled")).execute(handler);
+            ResponseBodyControl control = handler.control.get(5, SECONDS);
+            ChannelHandlerContext server = responseContext.get(5, SECONDS);
+            Channel channel = clientChannel.get();
+
+            runOnEventLoop(channel, () -> {
+                callFromAnotherThread(control::suspend);
+                control.resume();
+                return null;
+            });
+            awaitEventLoop(channel);
+
+            assertTrue(channel.config().isAutoRead(), "the queued suspend() must not override the later resume()");
+            writeChunk(server, "one");
+            assertEquals("one", handler.items.poll(5, SECONDS));
+            writeLast(server);
+            assertSame(handler, request.get(5, SECONDS));
+            assertNull(handler.throwable.get());
+        }
+    }
+
+    @Test
+    public void resumeFromAnotherThreadIsNotLostToALaterSuspend() throws Exception {
+        AtomicReference<Channel> clientChannel = new AtomicReference<>();
+        try (AsyncHttpClient client = asyncHttpClient(config()
+                .setRequestTimeout(Duration.ofSeconds(10))
+                .setHttpAdditionalChannelInitializer(clientChannel::set))) {
+            RecordingHandler handler = new RecordingHandler(false);
+            ListenableFuture<RecordingHandler> request = client.prepareGet(url("/controlled")).execute(handler);
+            ResponseBodyControl control = handler.control.get(5, SECONDS);
+            ChannelHandlerContext server = responseContext.get(5, SECONDS);
+            Channel channel = clientChannel.get();
+
+            runOnEventLoop(channel, () -> {
+                callFromAnotherThread(control::resume);
+                control.suspend();
+                return null;
+            });
+            awaitEventLoop(channel);
+
+            assertTrue(channel.config().isAutoRead(), "the later suspend() must not drop the queued resume()");
+            writeChunk(server, "one");
+            assertEquals("one", handler.items.poll(5, SECONDS));
+            writeLast(server);
+            assertSame(handler, request.get(5, SECONDS));
             assertNull(handler.throwable.get());
         }
     }
@@ -560,6 +617,15 @@ public class ResponseBodyControlTest {
     private static void awaitEventLoop(Channel channel) throws InterruptedException {
         channel.eventLoop().submit(() -> {
         }).sync();
+    }
+
+    private static void runOnEventLoop(Channel channel, Callable<?> task) throws Exception {
+        channel.eventLoop().submit(task).get(5, SECONDS);
+    }
+
+    // The calling event loop stays busy until the call returns, so the control has to queue the call behind it.
+    private static void callFromAnotherThread(Runnable call) throws Exception {
+        CompletableFuture.runAsync(call).get(5, SECONDS);
     }
 
     private static void writeChunk(ChannelHandlerContext ctx, String value) throws InterruptedException {

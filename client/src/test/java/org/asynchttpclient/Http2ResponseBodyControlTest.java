@@ -61,6 +61,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
@@ -174,6 +175,58 @@ public class Http2ResponseBodyControlTest {
             assertEquals("1", pooled.getResponseBody());
             assertEquals(1, connectionCount.get(), "the next stream must reuse the HTTP/2 parent connection");
             assertNull(handler.throwable.get());
+        }
+    }
+
+    @Test
+    public void earlierSuspendFromAnotherThreadDoesNotUndoLaterResume() throws Exception {
+        AtomicReference<Channel> connection = new AtomicReference<>();
+        try (AsyncHttpClient client = http2Client(connection::set)) {
+            RecordingHandler handler = new RecordingHandler();
+            ListenableFuture<RecordingHandler> request = client.prepareGet(url("/large")).execute(handler);
+            ResponseBodyControl control = handler.control.get(5, SECONDS);
+            assertTrue(largeResponseQueued.await(5, SECONDS));
+
+            // HTTP/2 streams share the event loop of their parent connection.
+            connection.get().eventLoop().submit(() -> {
+                callFromAnotherThread(control::suspend);
+                control.resume();
+                return null;
+            }).get(5, SECONDS);
+
+            largeResponseWritten.get(5, SECONDS);
+            assertSame(handler, request.get(5, SECONDS));
+            assertEquals((long) FRAME_SIZE * FRAME_COUNT, handler.bodyBytes.get());
+            assertNull(handler.throwable.get());
+        }
+    }
+
+    @Test
+    public void resumeFromAnotherThreadIsNotLostToALaterSuspend() throws Exception {
+        AtomicReference<Channel> connection = new AtomicReference<>();
+        try (AsyncHttpClient client = http2Client(connection::set)) {
+            RecordingHandler handler = new RecordingHandler();
+            ListenableFuture<RecordingHandler> request = client.prepareGet(url("/large")).execute(handler);
+            ResponseBodyControl control = handler.control.get(5, SECONDS);
+            assertTrue(largeResponseQueued.await(5, SECONDS));
+
+            connection.get().eventLoop().submit(() -> {
+                callFromAnotherThread(control::resume);
+                control.suspend();
+                return null;
+            }).get(5, SECONDS);
+
+            largeResponseWritten.get(5, SECONDS);
+            assertSame(handler, request.get(5, SECONDS));
+            assertEquals((long) FRAME_SIZE * FRAME_COUNT, handler.bodyBytes.get());
+            assertNull(handler.throwable.get());
+
+            Response sibling = client.prepareGet(url("/large-sibling"))
+                    .setReadTimeout(Duration.ofSeconds(5))
+                    .execute()
+                    .get(10, SECONDS);
+            assertEquals((long) FRAME_SIZE * SIBLING_FRAME_COUNT, sibling.getResponseBodyAsBytes().length);
+            assertEquals(1, connectionCount.get());
         }
     }
 
@@ -293,13 +346,24 @@ public class Http2ResponseBodyControlTest {
     }
 
     private AsyncHttpClient http2Client() {
+        return http2Client(ignored -> {
+        });
+    }
+
+    private AsyncHttpClient http2Client(Consumer<Channel> connectionInitializer) {
         return asyncHttpClient(config()
                 .setUseInsecureTrustManager(true)
                 .setHttp2Enabled(true)
                 .setHttp2InitialWindowSize(32 * 1024)
                 .setMaxConnectionsPerHost(1)
                 .setReadTimeout(Duration.ofMillis(100))
-                .setRequestTimeout(Duration.ofSeconds(10)));
+                .setRequestTimeout(Duration.ofSeconds(10))
+                .setHttpAdditionalChannelInitializer(connectionInitializer));
+    }
+
+    // The calling event loop stays busy until the call returns, so the control has to queue the call behind it.
+    private static void callFromAnotherThread(Runnable call) throws Exception {
+        CompletableFuture.runAsync(call).get(5, SECONDS);
     }
 
     private String url(String path) {
