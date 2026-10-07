@@ -18,14 +18,12 @@ package org.asynchttpclient.netty.handler.intercept;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.cookie.ClientCookieDecoder;
 import io.netty.handler.codec.http.cookie.Cookie;
-import io.netty.handler.codec.http.cookie.ServerCookieDecoder;
 import org.asynchttpclient.Request;
 import org.asynchttpclient.RequestBuilder;
 import org.asynchttpclient.cookie.CookieStore;
 import org.asynchttpclient.uri.Uri;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -44,16 +42,28 @@ final class CallerCookies {
     }
 
     /**
-     * The request's cookies minus the ones the store put there: those this response set, rotated or deleted,
-     * and those the store still holds with the same value. A caller's cookie sharing only a name with a stored
-     * one stays the caller's.
+     * The request's cookie objects minus the ones the store put there: those this response set, rotated or
+     * deleted, and those the store still holds with the same value. A caller's cookie sharing only a name with
+     * a stored one stays the caller's. A Cookie header the caller set is not among these; see
+     * {@link #headerCookies}.
      */
-    static List<Cookie> of(Request request, HttpResponse response, CookieStore cookieStore, Uri next,
-                           ClientCookieDecoder cookieDecoder) {
-        List<Cookie> cookies = withHeaderCookies(request);
+    private static List<Cookie> of(Request request, CookieStore cookieStore, Set<String> setByResponse) {
+        List<Cookie> cookies = request.getCookies();
         if (cookies.isEmpty()) {
             return cookies;
         }
+        List<Cookie> stored = cookieStore.get(request.getUri());
+        List<Cookie> callers = new ArrayList<>(cookies.size());
+        for (Cookie cookie : cookies) {
+            if (!setByResponse.contains(cookie.name().toLowerCase(Locale.ROOT)) && !holdsSameValue(stored, cookie)) {
+                callers.add(cookie);
+            }
+        }
+        return callers;
+    }
+
+    private static Set<String> replacedNames(HttpResponse response, CookieStore cookieStore, Uri next,
+                                             ClientCookieDecoder cookieDecoder) {
         // Only what the store took counts: a Set-Cookie it refused, or one for another path, leaves the
         // caller's cookie of that name in place. Names folded as the store keys them, so a SID set here also
         // replaces a request's sid.
@@ -81,14 +91,7 @@ final class CallerCookies {
                 setByResponse.add(cookie.name().toLowerCase(Locale.ROOT));
             }
         }
-        List<Cookie> stored = cookieStore.get(request.getUri());
-        List<Cookie> callers = new ArrayList<>(cookies.size());
-        for (Cookie cookie : cookies) {
-            if (!setByResponse.contains(cookie.name().toLowerCase(Locale.ROOT)) && !holdsSameValue(stored, cookie)) {
-                callers.add(cookie);
-            }
-        }
-        return callers;
+        return setByResponse;
     }
 
     /**
@@ -96,28 +99,76 @@ final class CallerCookies {
      */
     static void refresh(RequestBuilder retry, Request request, HttpResponse response, CookieStore cookieStore,
                         ClientCookieDecoder cookieDecoder) {
-        retry.setCookies(of(request, response, cookieStore, request.getUri(), cookieDecoder));
-        retry.setHeader(COOKIE, Collections.emptyList());
-        for (Cookie cookie : cookieStore.get(request.getUri())) {
+        refresh(retry, request, response, cookieStore, request.getUri(), cookieDecoder);
+    }
+
+    static void refresh(RequestBuilder retry, Request request, HttpResponse response, CookieStore cookieStore,
+                        Uri next, ClientCookieDecoder cookieDecoder) {
+        Set<String> setByResponse = replacedNames(response, cookieStore, next, cookieDecoder);
+        retry.setCookies(of(request, cookieStore, setByResponse));
+        retry.setHeader(COOKIE, headerCookies(request.getHeaders().getAll(COOKIE), setByResponse));
+        for (Cookie cookie : cookieStore.get(next)) {
             retry.addCookieIfUnset(cookie);
         }
     }
 
     /**
-     * The request's cookies plus the pairs of a Cookie header the caller set. A hop drops the raw header and
-     * sends these instead, reconciled against the response, or the header would outrank a cookie it rotated.
-     * Only the request the caller built sends the header as written.
+     * The caller's Cookie header values minus the pairs this response replaced, kept as text: a lenient decode
+     * followed by strict encoding can reject a value that was sent on the first attempt.
+     * <p>
+     * Every ';' ends a pair, inside quotes too: RFC 6265 does not allow one in a cookie value, and
+     * {@code NettyRequestFactory#mergeCookies} splits the same way when it decides which names the caller set.
+     * Honouring quotes here would let a stray '"' hide a replaced pair in its neighbour's value, to be resent
+     * stale while the merge still counts its name as the caller's and drops the store's new value. Only the
+     * replaced pairs are cut out, so the rest keeps its bytes and a header that loses none is returned as is.
      */
-    private static List<Cookie> withHeaderCookies(Request request) {
-        List<String> headers = request.getHeaders().getAll(COOKIE);
-        if (headers.isEmpty()) {
-            return request.getCookies();
+    private static List<String> headerCookies(List<String> headers, Set<String> setByResponse) {
+        if (setByResponse.isEmpty() || headers.isEmpty()) {
+            return headers;
         }
-        List<Cookie> cookies = new ArrayList<>(request.getCookies());
+        List<String> remaining = new ArrayList<>(headers.size());
         for (String header : headers) {
-            cookies.addAll(ServerCookieDecoder.LAX.decodeAll(header));
+            StringBuilder kept = new StringBuilder(header.length());
+            boolean removed = false;
+            int start = 0;
+            while (start <= header.length()) {
+                int end = header.indexOf(';', start);
+                if (end < 0) {
+                    end = header.length();
+                }
+                int nameEnd = start;
+                while (nameEnd < end && header.charAt(nameEnd) != '=') {
+                    nameEnd++;
+                }
+                String name = header.substring(start, nameEnd).trim();
+                if (!name.isEmpty() && setByResponse.contains(name.toLowerCase(Locale.ROOT))) {
+                    removed = true;
+                } else {
+                    if (kept.length() > 0) {
+                        kept.append(';');
+                    }
+                    kept.append(header, start, end);
+                }
+                start = end + 1;
+            }
+            if (!removed) {
+                remaining.add(header);
+                continue;
+            }
+            // Cutting the first or last pair leaves the whitespace or ';' that separated it at that end.
+            int from = 0;
+            int to = kept.length();
+            while (from < to && (kept.charAt(from) == ';' || kept.charAt(from) <= ' ')) {
+                from++;
+            }
+            while (to > from && (kept.charAt(to - 1) == ';' || kept.charAt(to - 1) <= ' ')) {
+                to--;
+            }
+            if (from < to) {
+                remaining.add(kept.substring(from, to));
+            }
         }
-        return cookies;
+        return remaining;
     }
 
     private static boolean holdsSameValue(List<Cookie> stored, Cookie cookie) {

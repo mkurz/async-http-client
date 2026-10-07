@@ -204,6 +204,126 @@ public class RedirectCookieRotationTest extends AbstractBasicTest {
         }
     }
 
+    @Test
+    void aRawCookieWithAValueTheStrictEncoderRejectsSurvivesARedirect() throws Exception {
+        try (AsyncHttpClient client = asyncHttpClient(config().setFollowRedirect(true))) {
+            String received = client.prepareGet(url("/bounce"))
+                    .setHeader("Cookie", "X=a b; flag; Y=1")
+                    .execute().get(TIMEOUT, TimeUnit.SECONDS).getHeader(RECEIVED_COOKIE);
+            assertEquals("X=a b; flag; Y=1", received);
+        }
+    }
+
+    @Test
+    void aRawCookieWithANonStrictValueSurvivesA307() throws Exception {
+        try (AsyncHttpClient client = asyncHttpClient(config().setFollowRedirect(true))) {
+            String received = client.preparePost(url("/login-307"))
+                    .setHeader("Cookie", "SID=old; X=a b")
+                    .execute().get(TIMEOUT, TimeUnit.SECONDS).getHeader(RECEIVED_COOKIE);
+            assertEquals(new HashSet<>(Arrays.asList("X=a b", "SID=new")), cookiesSent(received));
+        }
+    }
+
+    @Test
+    void aRotatedCookieDoesNotDisplaceAnUnrelatedRawValue() throws Exception {
+        try (AsyncHttpClient client = asyncHttpClient(config().setFollowRedirect(true))) {
+            String received = client.prepareGet(url("/login"))
+                    .setHeader("Cookie", "SID=old; X=a b")
+                    .execute().get(TIMEOUT, TimeUnit.SECONDS).getHeader(RECEIVED_COOKIE);
+            assertEquals(new HashSet<>(Arrays.asList("X=a b", "SID=new")), cookiesSent(received));
+        }
+    }
+
+    @Test
+    void rotationPreservesQuotedAndValuelessRawPairs() throws Exception {
+        try (AsyncHttpClient client = asyncHttpClient(config().setFollowRedirect(true))) {
+            String received = client.prepareGet(url("/login"))
+                    .setHeader("Cookie", "SID=old; X=\"a;b\"; flag; Y=a b")
+                    .execute().get(TIMEOUT, TimeUnit.SECONDS).getHeader(RECEIVED_COOKIE);
+            assertEquals("X=\"a;b\"; flag; Y=a b; SID=new", received);
+        }
+    }
+
+    @Test
+    void aRawCookieTheRedirectDeletedIsNotResent() throws Exception {
+        assertEquals("X=a b", withRawCookie("SID=old; X=a b", client -> client.prepareGet(url("/logout"))));
+        assertNull(withRawCookie("SID=old", client -> client.prepareGet(url("/logout"))));
+    }
+
+    /**
+     * Every ';' ends a raw pair, as it does where the request factory merges the header: a quote must not hide a
+     * pair the redirect replaced in its neighbour's value, or the stale one is resent and the new one dropped.
+     */
+    @Test
+    void aQuoteInARawValueDoesNotShieldTheSessionTheRedirectRotated() throws Exception {
+        assertEquals("X=a\"b; SID=new", withRawCookie("X=a\"b; SID=old", client -> client.prepareGet(url("/login"))));
+        assertEquals("X=\"a; SID=new", withRawCookie("X=\"a; SID=old\"", client -> client.prepareGet(url("/login"))));
+    }
+
+    @Test
+    void aQuoteInARawValueDoesNotShieldACookieTheRedirectDeleted() throws Exception {
+        assertEquals("X=\"a", withRawCookie("X=\"a; SID=old", client -> client.prepareGet(url("/logout"))));
+    }
+
+    /** Only the replaced pair is cut out; what is left, separators included, goes out as the caller wrote it. */
+    @Test
+    void theRawPairsARotationKeepsAreSentByteForByte() throws Exception {
+        assertEquals("prefs={\"a\":\"x;y\"}; SID=new",
+                withRawCookie("prefs={\"a\":\"x;y\"}; SID=old", client -> client.prepareGet(url("/login"))));
+        assertEquals("A=1;B=2; SID=new", withRawCookie("A=1;B=2; SID=old", client -> client.prepareGet(url("/login"))));
+        assertEquals("A=1;B=2; SID=new", withRawCookie("A=1;SID=old;B=2", client -> client.prepareGet(url("/login"))));
+        assertEquals("A=1; SID=new", withRawCookie("SID=a; A=1; sid=b", client -> client.prepareGet(url("/login"))));
+    }
+
+    @Test
+    void aRotationReachesEveryCookieHeaderTheCallerSet() throws Exception {
+        try (AsyncHttpClient client = asyncHttpClient(config().setFollowRedirect(true))) {
+            String received = client.prepareGet(url("/login"))
+                    .addHeader("Cookie", "X=a b; SID=old")
+                    .addHeader("Cookie", "A=1;B=2")
+                    .execute().get(TIMEOUT, TimeUnit.SECONDS).getHeader(RECEIVED_COOKIE);
+            assertEquals("X=a b; A=1;B=2; SID=new", received);
+        }
+        try (AsyncHttpClient client = asyncHttpClient(config().setFollowRedirect(true))) {
+            String received = client.prepareGet(url("/login"))
+                    .addHeader("Cookie", "A=1;B=2")
+                    .addHeader("Cookie", "SID=old")
+                    .execute().get(TIMEOUT, TimeUnit.SECONDS).getHeader(RECEIVED_COOKIE);
+            assertEquals("A=1;B=2; SID=new", received);
+        }
+    }
+
+    @Test
+    void aRawCookieSurvivesARotationWithTheLaxEncoder() throws Exception {
+        try (AsyncHttpClient client = asyncHttpClient(config().setFollowRedirect(true).setUseLaxCookieEncoder(true))) {
+            String received = client.prepareGet(url("/login"))
+                    .setHeader("Cookie", "flag; X=a b; SID=old")
+                    .execute().get(TIMEOUT, TimeUnit.SECONDS).getHeader(RECEIVED_COOKIE);
+            assertEquals("flag; X=a b; SID=new", received);
+        }
+    }
+
+    @Test
+    void rawCookieStillWinsOverAStoredCookieOfTheSameName() throws Exception {
+        try (AsyncHttpClient client = asyncHttpClient(config().setFollowRedirect(true))) {
+            client.prepareGet(url("/seed")).execute().get(TIMEOUT, TimeUnit.SECONDS);
+            String received = client.prepareGet(url("/bounce"))
+                    .setHeader("Cookie", "SID=mine; X=a b")
+                    .execute().get(TIMEOUT, TimeUnit.SECONDS).getHeader(RECEIVED_COOKIE);
+            assertEquals("SID=mine; X=a b", received);
+        }
+    }
+
+    @Test
+    void rawCookieDoesNotCrossAnOriginBoundary() throws Exception {
+        try (AsyncHttpClient client = asyncHttpClient(config().setFollowRedirect(true))) {
+            String received = client.prepareGet(url("/elsewhere"))
+                    .setHeader("Cookie", "X=a b")
+                    .execute().get(TIMEOUT, TimeUnit.SECONDS).getHeader(RECEIVED_COOKIE);
+            assertNull(received);
+        }
+    }
+
     /** A Set-Cookie the store refused, or filed for another path, does not replace the caller's cookie. */
     @Test
     void aSetCookieThatDoesNotReachTheNextHopLeavesTheCallersCookie() throws Exception {
@@ -238,6 +358,14 @@ public class RedirectCookieRotationTest extends AbstractBasicTest {
         try (AsyncHttpClient client = asyncHttpClient(config().setFollowRedirect(true))) {
             client.prepareGet(url("/seed")).execute().get(TIMEOUT, TimeUnit.SECONDS);
             return request.apply(client).addCookie(new DefaultCookie(name, value))
+                    .execute().get(TIMEOUT, TimeUnit.SECONDS).getHeader(RECEIVED_COOKIE);
+        }
+    }
+
+    private String withRawCookie(String header, Function<AsyncHttpClient, BoundRequestBuilder> request)
+            throws Exception {
+        try (AsyncHttpClient client = asyncHttpClient(config().setFollowRedirect(true))) {
+            return request.apply(client).setHeader("Cookie", header)
                     .execute().get(TIMEOUT, TimeUnit.SECONDS).getHeader(RECEIVED_COOKIE);
         }
     }

@@ -207,9 +207,8 @@ public class Redirect30xInterceptor {
                 CookieStore cookieStore = config.getCookieStore();
                 if (stripAuth) {
                     requestBuilder.resetCookies();
-                } else {
-                    requestBuilder.setCookies(cookieStore == null
-                            ? request.getCookies() : CallerCookies.of(request, response, cookieStore, newUri, cookieDecoder));
+                } else if (cookieStore == null) {
+                    requestBuilder.setCookies(request.getCookies());
                 }
 
                 requestBuilder.setMethod(switchToGet ? GET : originalMethod)
@@ -253,9 +252,13 @@ public class Redirect30xInterceptor {
                 final boolean initialConnectionKeepAlive = future.isKeepAlive();
 
                 if (cookieStore != null) {
-                    // Update request's cookies assuming that cookie store is already updated by Interceptors
-                    for (Cookie cookie : cookieStore.get(newUri)) {
-                        requestBuilder.addCookieIfUnset(cookie);
+                    if (stripAuth) {
+                        // Only cookies scoped to the new URI may cross this security boundary.
+                        for (Cookie cookie : cookieStore.get(newUri)) {
+                            requestBuilder.addCookieIfUnset(cookie);
+                        }
+                    } else {
+                        CallerCookies.refresh(requestBuilder, request, response, cookieStore, newUri, cookieDecoder);
                     }
                 }
 
@@ -481,7 +484,7 @@ public class Redirect30xInterceptor {
                     .remove(PROXY_AUTHORIZATION);
         }
         if (cookiesReconciled) {
-            // CallerCookies carries its pairs in the cookie list.
+            // Unless stripped above, CallerCookies.refresh puts it back minus the pairs this response replaced.
             headers.remove(COOKIE);
         }
         return headers;
