@@ -68,6 +68,7 @@ import static org.asynchttpclient.Dsl.asyncHttpClient;
 import static org.asynchttpclient.Dsl.config;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -289,6 +290,29 @@ public class Http2ResponseBodyControlTest {
             Response sibling = client.prepareGet(url("/pool")).execute().get(5, SECONDS);
             assertEquals("1", sibling.getResponseBody());
             assertEquals(1, connectionCount.get());
+        }
+    }
+
+    @Test
+    public void executeFromAnotherThreadCanResumeAnHttp2Stream() throws Exception {
+        try (AsyncHttpClient client = http2Client()) {
+            RecordingHandler handler = new RecordingHandler();
+            ListenableFuture<RecordingHandler> request = client.prepareGet(url("/large")).execute(handler);
+            ResponseBodyControl control = handler.control.get(5, SECONDS);
+            assertTrue(largeResponseQueued.await(5, SECONDS));
+            assertThrows(TimeoutException.class, () -> request.get(250, MILLISECONDS));
+
+            CompletableFuture<Thread> taskThread = new CompletableFuture<>();
+            control.execute(() -> {
+                taskThread.complete(Thread.currentThread());
+                control.resume();
+            });
+
+            assertSame(handler, request.get(10, SECONDS));
+            assertNotSame(Thread.currentThread(), taskThread.get(5, SECONDS),
+                    "a task from another thread must run on the stream's event loop");
+            assertEquals((long) FRAME_SIZE * FRAME_COUNT, handler.bodyBytes.get());
+            assertNull(handler.throwable.get());
         }
     }
 

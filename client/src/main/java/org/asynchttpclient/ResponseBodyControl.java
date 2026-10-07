@@ -24,6 +24,8 @@ package org.asynchttpclient;
  * A control is also supplied when the final response headers end the response without a body. In that case,
  * {@link #suspend()} cannot defer completion: the control becomes inactive when
  * {@link AsyncHandler#onResponseBodyStart(ResponseBodyControl)} returns, and later calls have no effect.
+ * <p>
+ * Unlike calls to the other methods, a task passed to {@link #execute(Runnable)} still runs after completion.
  *
  * @since 3.0.14
  */
@@ -59,4 +61,36 @@ public interface ResponseBodyControl {
      * intended for cancellation after the callback has returned, including from another thread.
      */
     void cancel();
+
+    /**
+     * Runs {@code task} on the event loop that delivers this response's body, in sequence with the {@link AsyncHandler}
+     * callbacks that AHC makes on that event loop, such as
+     * {@link AsyncHandler#onBodyPartReceived(HttpResponseBodyPart)}.
+     * <p>
+     * Called on that event loop, for example from one of those callbacks, the task runs before this method returns.
+     * Called from any other thread, the task is queued to the event loop and runs there after the work already pending
+     * on it; the event loop can deliver further body parts before the task runs. Either way, {@link #suspend()},
+     * {@link #resume()} and {@link #cancel()} called from the task take effect immediately, and the task sees every
+     * body part delivered before it runs.
+     * <p>
+     * Not every callback runs on that event loop. {@link AsyncHandler#onThrowable(Throwable)} can run on the thread
+     * that cancels the request, or on a timer thread when a timeout fires. A task passed to this method from there is
+     * queued like one from any other thread, and can run while that callback is still running.
+     * <p>
+     * This lets a consumer that buffers body parts on another thread decide whether to resume reads based on everything
+     * delivered so far. Calling {@link #resume()} directly from that thread instead acts on a decision that a body part
+     * delivered in the meantime can make stale, and can let another read through after the consumer's demand is met.
+     * <p>
+     * The task can run on a transport thread and must not block. It also runs after the response has completed. If the
+     * event loop no longer accepts tasks, for example because it is shutting down, the task does not run.
+     * <p>
+     * The default implementation runs the task on the calling thread. That suits implementations that apply control
+     * calls synchronously on the calling thread; it does not order the task with callbacks made on other threads.
+     *
+     * @param task the task to run
+     * @since 3.0.15
+     */
+    default void execute(Runnable task) {
+        task.run();
+    }
 }

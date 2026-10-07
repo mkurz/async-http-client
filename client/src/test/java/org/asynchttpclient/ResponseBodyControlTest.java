@@ -557,6 +557,157 @@ public class ResponseBodyControlTest {
         tlsServerPort = ((InetSocketAddress) tlsServerChannel.localAddress()).getPort();
     }
 
+    @Test
+    public void executeRunsInlineOnTheEventLoopAndQueuedFromAnotherThread() throws Exception {
+        AtomicReference<Channel> clientChannel = new AtomicReference<>();
+        CompletableFuture<Boolean> ranInlineInCallback = new CompletableFuture<>();
+        try (AsyncHttpClient client = asyncHttpClient(config()
+                .setRequestTimeout(Duration.ofSeconds(10))
+                .setHttpAdditionalChannelInitializer(clientChannel::set))) {
+            RecordingHandler handler = new RecordingHandler(true) {
+                @Override
+                public State onBodyPartReceived(HttpResponseBodyPart bodyPart) throws IOException {
+                    AtomicBoolean ran = new AtomicBoolean();
+                    super.responseBodyControl.execute(() -> ran.set(true));
+                    ranInlineInCallback.complete(ran.get());
+                    return super.onBodyPartReceived(bodyPart);
+                }
+            };
+            ListenableFuture<RecordingHandler> request = client.prepareGet(url("/controlled")).execute(handler);
+            ResponseBodyControl control = handler.control.get(5, SECONDS);
+            ChannelHandlerContext server = responseContext.get(5, SECONDS);
+            Channel channel = clientChannel.get();
+
+            CompletableFuture<Thread> taskThread = new CompletableFuture<>();
+            CompletableFuture<Boolean> autoReadSeenByTask = new CompletableFuture<>();
+            control.resume();
+            control.execute(() -> {
+                taskThread.complete(Thread.currentThread());
+                autoReadSeenByTask.complete(channel.config().isAutoRead());
+            });
+            assertTrue(channel.eventLoop().inEventLoop(taskThread.get(5, SECONDS)),
+                    "a task from another thread must run on the channel event loop");
+            assertTrue(autoReadSeenByTask.get(5, SECONDS), "a task must run after control calls queued before it");
+
+            writeChunk(server, "one");
+            assertEquals("one", handler.items.poll(5, SECONDS));
+            assertTrue(ranInlineInCallback.get(5, SECONDS), "a task from a callback must run before execute returns");
+
+            writeLast(server);
+            control.resume();
+            assertSame(handler, request.get(5, SECONDS));
+            assertNull(handler.throwable.get());
+        }
+    }
+
+    @Test
+    public void executeLetsAnotherThreadDecideOnEverythingDeliveredBeforeTheTask() throws Exception {
+        AtomicReference<Channel> clientChannel = new AtomicReference<>();
+        CountDownLatch firstPartBuffered = new CountDownLatch(1);
+        try (AsyncHttpClient client = asyncHttpClient(config()
+                .setRequestTimeout(Duration.ofSeconds(10))
+                .setHttpAdditionalChannelInitializer(clientChannel::set))) {
+            RecordingHandler handler = new RecordingHandler(true) {
+                @Override
+                public State onBodyPartReceived(HttpResponseBodyPart bodyPart) throws IOException {
+                    if (firstPartBuffered.getCount() == 0) {
+                        return super.onBodyPartReceived(bodyPart);
+                    }
+                    // While this part is being delivered, a consumer on another thread finds its buffer empty. It
+                    // decides in a task whether to resume, so the decision sees the part buffered below.
+                    LinkedBlockingQueue<String> buffer = super.items;
+                    ResponseBodyControl control = super.responseBodyControl;
+                    runOnAnotherThread(() -> control.execute(() -> {
+                        if (buffer.isEmpty()) {
+                            control.resume();
+                        }
+                    }));
+                    State state = super.onBodyPartReceived(bodyPart);
+                    firstPartBuffered.countDown();
+                    return state;
+                }
+            };
+            ListenableFuture<RecordingHandler> request = client.prepareGet(url("/controlled")).execute(handler);
+            ResponseBodyControl control = handler.control.get(5, SECONDS);
+            ChannelHandlerContext server = responseContext.get(5, SECONDS);
+            Channel channel = clientChannel.get();
+
+            control.resume();
+            writeChunk(server, "one");
+            assertTrue(firstPartBuffered.await(5, SECONDS));
+            awaitEventLoop(channel);
+
+            assertFalse(channel.config().isAutoRead(), "the task must see the part buffered after it was queued");
+            writeChunk(server, "two");
+            assertEquals("one", handler.items.poll(5, SECONDS));
+            assertNull(handler.items.poll(250, MILLISECONDS), "a suspended response must not read new body bytes");
+
+            control.execute(() -> {
+                if (handler.items.isEmpty()) {
+                    control.resume();
+                }
+            });
+            assertEquals("two", handler.items.poll(5, SECONDS));
+            writeLast(server);
+            control.resume();
+            assertSame(handler, request.get(5, SECONDS));
+            assertNull(handler.throwable.get());
+        }
+    }
+
+    @Test
+    public void executeStillRunsTheTaskAfterTheResponseCompleted() throws Exception {
+        AtomicReference<Channel> clientChannel = new AtomicReference<>();
+        try (AsyncHttpClient client = asyncHttpClient(config()
+                .setRequestTimeout(Duration.ofSeconds(10))
+                .setHttpAdditionalChannelInitializer(clientChannel::set))) {
+            RecordingHandler handler = new RecordingHandler(false);
+            ListenableFuture<RecordingHandler> request = client.prepareGet(url("/controlled")).execute(handler);
+            ResponseBodyControl control = handler.control.get(5, SECONDS);
+            ChannelHandlerContext server = responseContext.get(5, SECONDS);
+            control.resume();
+            writeLast(server);
+            assertSame(handler, request.get(5, SECONDS));
+
+            CompletableFuture<Thread> taskThread = new CompletableFuture<>();
+            control.execute(() -> {
+                // A control call has no effect once the response has completed.
+                control.resume();
+                taskThread.complete(Thread.currentThread());
+            });
+            assertTrue(clientChannel.get().eventLoop().inEventLoop(taskThread.get(5, SECONDS)));
+            assertNull(handler.throwable.get());
+        }
+    }
+
+    @Test
+    public void defaultExecuteRunsTheTaskOnTheCallingThread() {
+        ResponseBodyControl control = new ResponseBodyControl() {
+            @Override
+            public void suspend() {
+            }
+
+            @Override
+            public void resume() {
+            }
+
+            @Override
+            public void cancel() {
+            }
+        };
+        AtomicReference<Thread> taskThread = new AtomicReference<>();
+
+        control.execute(() -> taskThread.set(Thread.currentThread()));
+        assertSame(Thread.currentThread(), taskThread.get());
+    }
+
+    private static void runOnAnotherThread(Runnable action) {
+        Thread thread = new Thread(action, "response-body-control-consumer");
+        thread.start();
+        assertDoesNotThrow(() -> thread.join(SECONDS.toMillis(5)));
+        assertFalse(thread.isAlive(), "the other thread must finish");
+    }
+
     private static void awaitEventLoop(Channel channel) throws InterruptedException {
         channel.eventLoop().submit(() -> {
         }).sync();
