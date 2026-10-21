@@ -62,6 +62,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -92,6 +94,7 @@ public class ResponseBodyControlTest {
             AttributeKey.valueOf("response-body-control-connection-id");
 
     private final AtomicInteger connectionCount = new AtomicInteger();
+    private final ExecutorService anotherThread = Executors.newSingleThreadExecutor();
     private final CompletableFuture<ChannelHandlerContext> responseContext = new CompletableFuture<>();
     private final CompletableFuture<ChannelHandlerContext> firstReplayContext = new CompletableFuture<>();
     private final CompletableFuture<ChannelHandlerContext> secondReplayContext = new CompletableFuture<>();
@@ -133,6 +136,7 @@ public class ResponseBodyControlTest {
 
     @AfterEach
     public void stopServer() throws InterruptedException {
+        anotherThread.shutdownNow();
         if (serverChildChannels != null) {
             serverChildChannels.close().sync();
         }
@@ -216,6 +220,8 @@ public class ResponseBodyControlTest {
 
     @Test
     public void resumeFromAnotherThreadIsNotLostToALaterSuspend() throws Exception {
+        // This also passes when no queued suspend() is skipped. It fails if a queued resume() is skipped for a later
+        // suspend().
         AtomicReference<Channel> clientChannel = new AtomicReference<>();
         try (AsyncHttpClient client = asyncHttpClient(config()
                 .setRequestTimeout(Duration.ofSeconds(10))
@@ -624,8 +630,8 @@ public class ResponseBodyControlTest {
     }
 
     // The calling event loop stays busy until the call returns, so the control has to queue the call behind it.
-    private static void callFromAnotherThread(Runnable call) throws Exception {
-        CompletableFuture.runAsync(call).get(5, SECONDS);
+    private void callFromAnotherThread(Runnable call) throws Exception {
+        anotherThread.submit(call).get(5, SECONDS);
     }
 
     private static void writeChunk(ChannelHandlerContext ctx, String value) throws InterruptedException {

@@ -35,8 +35,9 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.util.Queue;
 import java.util.concurrent.Callable;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -54,6 +55,7 @@ public class NettyResponseBodyControlTest {
     private final AtomicInteger reads = new AtomicInteger();
     private final AtomicInteger suspensionsStarted = new AtomicInteger();
     private final AtomicInteger suspensionsEnded = new AtomicInteger();
+    private final ExecutorService anotherThread = Executors.newSingleThreadExecutor();
 
     private EventLoopGroup group;
     private Channel channel;
@@ -74,6 +76,7 @@ public class NettyResponseBodyControlTest {
 
     @AfterEach
     public void closeChannel() throws InterruptedException {
+        anotherThread.shutdownNow();
         channel.close().sync();
         group.shutdownGracefully(0, 100, MILLISECONDS).sync();
     }
@@ -100,6 +103,8 @@ public class NettyResponseBodyControlTest {
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     public void resumeFromAnotherThreadIsNotLostToALaterSuspend(boolean autoRead) throws Exception {
+        // This also passes when no queued suspend() is skipped. It fails if a queued resume() is skipped for a later
+        // suspend().
         NettyResponseBodyControl control = suspendedControl(autoRead);
         control.resume();
         awaitEventLoop();
@@ -135,7 +140,8 @@ public class NettyResponseBodyControlTest {
         awaitEventLoop();
         assertTrue(NettyResponseBodyControl.isSuspended(future));
         assertFalse(channel.config().isAutoRead());
-        assertEquals(suspensionsEnded.get() + 1, suspensionsStarted.get());
+        assertEquals(3, suspensionsStarted.get());
+        assertEquals(2, suspensionsEnded.get());
 
         onEventLoop(() -> {
             callFromAnotherThread(control::resume);
@@ -146,7 +152,8 @@ public class NettyResponseBodyControlTest {
         awaitEventLoop();
         assertFalse(NettyResponseBodyControl.isSuspended(future));
         assertEquals(autoRead, channel.config().isAutoRead());
-        assertEquals(suspensionsStarted.get(), suspensionsEnded.get());
+        assertEquals(3, suspensionsStarted.get(), "the skipped suspend() must not start a suspension");
+        assertEquals(3, suspensionsEnded.get());
     }
 
     @ParameterizedTest
@@ -227,8 +234,8 @@ public class NettyResponseBodyControlTest {
     }
 
     // The calling event loop stays busy until the call returns, so the control has to queue the call behind it.
-    private static void callFromAnotherThread(Runnable call) throws Exception {
-        CompletableFuture.runAsync(call).get(5, SECONDS);
+    private void callFromAnotherThread(Runnable call) throws Exception {
+        anotherThread.submit(call).get(5, SECONDS);
     }
 
     /**

@@ -55,6 +55,8 @@ import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -85,6 +87,7 @@ public class Http2ResponseBodyControlTest {
     private static final int CANCELLATION_ATTEMPTS = 8;
 
     private final AtomicInteger connectionCount = new AtomicInteger();
+    private final ExecutorService anotherThread = Executors.newSingleThreadExecutor();
     private final CountDownLatch largeResponseQueued = new CountDownLatch(1);
     private final CompletableFuture<Void> largeResponseWritten = new CompletableFuture<>();
     private final CountDownLatch cancelledStreamClosed = new CountDownLatch(1);
@@ -140,6 +143,7 @@ public class Http2ResponseBodyControlTest {
 
     @AfterEach
     public void stopServer() throws InterruptedException {
+        anotherThread.shutdownNow();
         if (serverChildChannels != null) {
             serverChildChannels.close().sync();
         }
@@ -198,11 +202,20 @@ public class Http2ResponseBodyControlTest {
             assertSame(handler, request.get(5, SECONDS));
             assertEquals((long) FRAME_SIZE * FRAME_COUNT, handler.bodyBytes.get());
             assertNull(handler.throwable.get());
+
+            Response sibling = client.prepareGet(url("/large-sibling"))
+                    .setReadTimeout(Duration.ofSeconds(5))
+                    .execute()
+                    .get(10, SECONDS);
+            assertEquals((long) FRAME_SIZE * SIBLING_FRAME_COUNT, sibling.getResponseBodyAsBytes().length);
+            assertEquals(1, connectionCount.get());
         }
     }
 
     @Test
     public void resumeFromAnotherThreadIsNotLostToALaterSuspend() throws Exception {
+        // This also passes when no queued suspend() is skipped. It fails if a queued resume() is skipped for a later
+        // suspend().
         AtomicReference<Channel> connection = new AtomicReference<>();
         try (AsyncHttpClient client = http2Client(connection::set)) {
             RecordingHandler handler = new RecordingHandler();
@@ -362,8 +375,8 @@ public class Http2ResponseBodyControlTest {
     }
 
     // The calling event loop stays busy until the call returns, so the control has to queue the call behind it.
-    private static void callFromAnotherThread(Runnable call) throws Exception {
-        CompletableFuture.runAsync(call).get(5, SECONDS);
+    private void callFromAnotherThread(Runnable call) throws Exception {
+        anotherThread.submit(call).get(5, SECONDS);
     }
 
     private String url(String path) {
