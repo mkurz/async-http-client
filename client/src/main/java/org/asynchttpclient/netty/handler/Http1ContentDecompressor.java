@@ -43,6 +43,7 @@ import io.netty.util.ReferenceCountUtil;
 import org.asynchttpclient.netty.DiscardEvent;
 import org.asynchttpclient.netty.NettyResponseBodyControl;
 import org.asynchttpclient.netty.NettyResponseFuture;
+import org.asynchttpclient.netty.OnLastHttpContentCallback;
 import org.asynchttpclient.netty.channel.Channels;
 import org.jetbrains.annotations.Nullable;
 
@@ -64,6 +65,9 @@ import java.util.ArrayDeque;
  * <p>
  * Closing the channel tears its pipeline down, so if the connection closes while input is held back, the rest of
  * it is inflated and handed on at once, as it was before.
+ * <p>
+ * Once nobody reads the rest of the body, because the exchange is over or the channel is being drained, its
+ * remaining input is dropped instead of inflated.
  * <p>
  * The cumulative decompressed size of each response is bounded by {@code maxDecompressedBytes}; exceeding it
  * fails the exchange with a {@link DecompressionException}, the same exception type the HTTP/2 path uses. Only
@@ -174,8 +178,8 @@ public class Http1ContentDecompressor extends ChannelDuplexHandler {
                 Decompressor decompressor = this.decompressor;
                 if (decompressor != null && hasOutput(decompressor)) {
                     Channel channel = ctx.channel();
-                    if (isAbandoned(channel)) {
-                        // The exchange is over; inflating the rest of its body would be wasted work.
+                    if (isUnwanted(channel)) {
+                        // Nobody reads the rest of this body, so inflating it would be wasted work.
                         closeDecompressor();
                         continue;
                     }
@@ -377,9 +381,14 @@ public class Http1ContentDecompressor extends ChannelDuplexHandler {
                 && NettyResponseBodyControl.isSuspended((NettyResponseFuture<?>) attribute, channel);
     }
 
-    private static boolean isAbandoned(Channel channel) {
+    /**
+     * Whether the rest of the current body is discarded: the exchange is over, or the channel is being drained, for
+     * example after a redirect, an authentication challenge or a retry. Its terminating chunk is still handed on, so a
+     * drain callback still runs.
+     */
+    private static boolean isUnwanted(Channel channel) {
         Object attribute = Channels.getAttribute(channel);
-        return attribute == DiscardEvent.DISCARD
+        return attribute == DiscardEvent.DISCARD || attribute instanceof OnLastHttpContentCallback
                 || attribute instanceof NettyResponseFuture && ((NettyResponseFuture<?>) attribute).isDone();
     }
 
