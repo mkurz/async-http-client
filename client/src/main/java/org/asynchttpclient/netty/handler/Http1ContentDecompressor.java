@@ -40,6 +40,7 @@ import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.LastHttpContent;
 import io.netty.util.ReferenceCountUtil;
+import org.asynchttpclient.ResponseBodyControl;
 import org.asynchttpclient.netty.DiscardEvent;
 import org.asynchttpclient.netty.NettyResponseBodyControl;
 import org.asynchttpclient.netty.NettyResponseFuture;
@@ -54,17 +55,20 @@ import java.util.ArrayDeque;
  * bounds how far the body may inflate in total.
  * <p>
  * Netty's {@code HttpContentDecompressor} inflates each compressed chunk completely as soon as it is read.
- * Suspending a response through {@link org.asynchttpclient.ResponseBodyControl} stops further socket reads but
+ * Suspending a response through {@link ResponseBodyControl} stops further socket reads but
  * cannot stop that, so one socket read of a highly compressible body still became tens of megabytes of body parts
  * nobody had asked for. This handler uses Netty's pull-based {@link Decompressor} instead and hands the body on
  * one part of at most {@value #MAX_PART_SIZE} bytes at a time. Before each part it checks whether the response is
  * suspended. If it is, the compressed input stays here, together with every message that arrived after it, and
  * the next read request, such as the one {@code resume()} issues, inflates that input before it is passed on to
  * the transport. A suspension that takes effect on the event loop, as one made from a body callback does,
- * therefore stops decompression before the next part.
+ * therefore stops decompression before the next part. Only parts with content wait for a resume: once the body has
+ * been inflated in full, its terminating chunk, with any trailers, is handed on even to a suspended response, as for
+ * an unencoded body, so the response completes without another resume.
  * <p>
  * Closing the channel tears its pipeline down, so if the connection closes while input is held back, the rest of
- * it is inflated and handed on at once, as it was before.
+ * it is inflated and handed on at once, even to a suspended response. Suspension no longer bounds that output;
+ * only {@code maxDecompressedBytes} does.
  * <p>
  * Once nobody reads the rest of the body, because the exchange is over or the channel is being drained, its
  * remaining input is dropped instead of inflated.
@@ -77,8 +81,8 @@ import java.util.ArrayDeque;
  * Content codings, and the {@code Content-Encoding}, {@code Content-Length} and {@code Transfer-Encoding} header
  * rewrites, follow Netty's {@code HttpContentDecompressor}.
  * <p>
- * Netty still marks its {@link Decompressor} API as unstable while it migrates its codecs to it, so a Netty upgrade
- * may require changes here.
+ * Netty added its {@link Decompressor} API in 4.2.17, so AHC needs at least that version. Netty still marks the API as
+ * unstable while it migrates its codecs to it, so a Netty upgrade may require changes here.
  */
 public class Http1ContentDecompressor extends ChannelDuplexHandler {
 

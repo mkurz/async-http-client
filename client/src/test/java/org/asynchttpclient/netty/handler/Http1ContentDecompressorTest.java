@@ -165,6 +165,7 @@ public class Http1ContentDecompressorTest {
         int parts;
         int maxPart;
         boolean last;
+        String trailer;
 
         Body drain(EmbeddedChannel channel) {
             Object msg;
@@ -178,6 +179,9 @@ public class Http1ContentDecompressorTest {
                         bytes.writeBytes(toBytes(content));
                     }
                     last = msg instanceof LastHttpContent;
+                    if (last) {
+                        trailer = ((LastHttpContent) msg).trailingHeaders().get("x-trailer");
+                    }
                 }
                 messages.add(msg instanceof HttpContent ? ((HttpContent) msg).getClass() : msg);
                 ReferenceCountUtil.release(msg);
@@ -345,7 +349,10 @@ public class Http1ContentDecompressorTest {
             this("gzip", ZEROS_GZIP, ZEROS_GZIP.length, maxDecompressedBytes, suspendBeforeBody, true);
         }
 
-        /** Writes the body in fragments of {@code fragmentSize} bytes, the last one as the {@link LastHttpContent}. */
+        /**
+         * Writes the body in fragments of {@code fragmentSize} bytes, the last one as the {@link LastHttpContent},
+         * which carries the trailer {@code x-trailer: done}.
+         */
         SuspendedExchange(String contentEncoding, byte[] body, int fragmentSize, long maxDecompressedBytes,
                           boolean suspendBeforeBody, boolean autoRead) {
             suspendedBeforeBody = suspendBeforeBody;
@@ -373,13 +380,20 @@ public class Http1ContentDecompressorTest {
             if (suspendBeforeBody) {
                 control.suspend();
             }
-            for (int offset = 0; offset < body.length; offset += fragmentSize) {
+            int offset = 0;
+            do {
                 int length = Math.min(fragmentSize, body.length - offset);
                 ByteBuf fragment = Unpooled.wrappedBuffer(body, offset, length);
                 input.add(fragment);
-                channel.writeInbound(offset + length < body.length ? new DefaultHttpContent(fragment)
-                        : new DefaultLastHttpContent(fragment));
-            }
+                offset += length;
+                if (offset < body.length) {
+                    channel.writeInbound(new DefaultHttpContent(fragment));
+                } else {
+                    LastHttpContent last = new DefaultLastHttpContent(fragment);
+                    last.trailingHeaders().set("x-trailer", "done");
+                    channel.writeInbound(last);
+                }
+            } while (offset < body.length);
             compressed = input.get(0);
         }
 
@@ -437,6 +451,29 @@ public class Http1ContentDecompressorTest {
         assertEquals(resumes + 1, body.parts);
         assertEquals(0, exchange.compressed.refCnt());
         assertFalse(exchange.channel.finishAndReleaseAll());
+    }
+
+    @Test
+    public void endOfTheBodyFollowsItsLastPartWithoutAnotherResume() {
+        // Only parts with content wait for a resume. Once the body has been inflated in full, its end and trailers are
+        // handed on even while the response is suspended, as for an unencoded body, so a consumer whose demand ended
+        // with the last part still learns that the body is complete.
+        byte[] payload = "the end follows\n".repeat(100).getBytes(StandardCharsets.US_ASCII);
+        byte[] compressed = gzip(payload);
+        SuspendedExchange exchange = new SuspendedExchange("gzip", compressed, compressed.length, 0, false, true);
+        Body body = new Body().drain(exchange.channel);
+        assertEquals(1, body.parts);
+        assertTrue(body.last, "the end of a fully inflated body must not wait for a resume");
+        assertEquals("done", body.trailer);
+        assertArrayEquals(payload, body.bytes.toByteArray());
+        assertFalse(exchange.channel.finishAndReleaseAll());
+
+        // The same holds for a compressed response without any body bytes, suspended before its body.
+        SuspendedExchange empty = new SuspendedExchange("gzip", new byte[0], 1, 0, true, true);
+        Body emptyBody = new Body().drain(empty.channel);
+        assertEquals(0, emptyBody.parts);
+        assertTrue(emptyBody.last, "a suspended response without body bytes must still end");
+        assertFalse(empty.channel.finishAndReleaseAll());
     }
 
     @Test
