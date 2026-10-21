@@ -49,6 +49,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Random;
 import java.util.zip.Deflater;
@@ -500,6 +501,45 @@ public class Http1ContentDecompressorTest {
         assertTrue(body.last);
         assertEquals(delivered, body.bytes.size());
         assertFalse(exchange.channel.finishAndReleaseAll());
+    }
+
+    /** One part made of many small decompressor outputs: one per gzip member of {@code memberSize} bytes. */
+    private static ByteBuf mergedPart(int members, int memberSize) {
+        byte[] member = gzip("x".repeat(memberSize).getBytes(StandardCharsets.US_ASCII));
+        byte[] compressed = concat(Collections.nCopies(members, member).toArray(new byte[0][]));
+        EmbeddedChannel channel = new EmbeddedChannel(new Http1ContentDecompressor(false, 0));
+        channel.writeInbound(response("gzip", compressed.length));
+        channel.writeInbound(new DefaultLastHttpContent(Unpooled.wrappedBuffer(compressed)));
+        ReferenceCountUtil.release(channel.readInbound());
+        HttpContent part = channel.readInbound();
+        assertInstanceOf(LastHttpContent.class, channel.readInbound());
+        assertFalse(channel.finishAndReleaseAll());
+        return part.content();
+    }
+
+    @Test
+    public void mergedPartIsAllocatedForWhatItHolds() {
+        ByteBuf part = mergedPart(10, 100);
+        try {
+            assertEquals(1_000, part.readableBytes());
+            assertTrue(part.capacity() <= 2 * part.readableBytes(),
+                    "a small merged part must not take a whole part's buffer: " + part.capacity());
+        } finally {
+            part.release();
+        }
+    }
+
+    @Test
+    public void mergedPartGrowsUpToThePartSize() {
+        ByteBuf part = mergedPart(40, 1_000);
+        try {
+            assertEquals(40_000, part.readableBytes());
+            assertTrue(part.capacity() <= Http1ContentDecompressor.MAX_PART_SIZE);
+            byte[] expected = "x".repeat(40_000).getBytes(StandardCharsets.US_ASCII);
+            assertArrayEquals(expected, toBytes(part));
+        } finally {
+            part.release();
+        }
     }
 
     @Test

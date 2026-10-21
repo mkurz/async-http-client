@@ -325,7 +325,7 @@ public class Http1ContentDecompressor extends ChannelDuplexHandler {
                 } else {
                     if (!merged) {
                         ByteBuf first = part;
-                        part = alloc.heapBuffer(MAX_PART_SIZE);
+                        part = alloc.heapBuffer(first.readableBytes() + length, MAX_PART_SIZE);
                         part.writeBytes(first);
                         first.release();
                         merged = true;
