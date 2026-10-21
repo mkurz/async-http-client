@@ -43,6 +43,8 @@ import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.HttpUtil;
 import io.netty.handler.codec.http.LastHttpContent;
 import io.netty.util.concurrent.GlobalEventExecutor;
+import org.asynchttpclient.filter.FilterContext;
+import org.asynchttpclient.filter.IOExceptionFilter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -53,8 +55,10 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import java.util.Random;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -298,6 +302,72 @@ public class Http1DecompressionSuspensionTest {
     }
 
     @Test
+    public void replayWhileInputIsHeldBackStartsTheResponseAfresh() throws Exception {
+        assertReplayStartsAfresh(true);
+    }
+
+    @Test
+    public void replayWhileInputIsHeldBackStartsTheResponseAfreshWithAutoReadDisabled() throws Exception {
+        assertReplayStartsAfresh(false);
+    }
+
+    /**
+     * An IOException filter replays the request while the decompressor holds back input of the first response. The
+     * handler, told to retry, must receive nothing more of the first response, whose connection is drained and closed.
+     */
+    private void assertReplayStartsAfresh(boolean autoRead) throws Exception {
+        AtomicBoolean replayed = new AtomicBoolean();
+        IOExceptionFilter replayOnce = new IOExceptionFilter() {
+            @Override
+            public <T> FilterContext<T> filter(FilterContext<T> ctx) {
+                if (ctx.getIOException() != null && replayed.compareAndSet(false, true)) {
+                    return new FilterContext.FilterContextBuilder<>(ctx.getAsyncHandler(), ctx.getRequest())
+                            .replayRequest(true)
+                            .build();
+                }
+                return ctx;
+            }
+        };
+        List<Channel> clientChannels = new CopyOnWriteArrayList<>();
+        DefaultAsyncHttpClientConfig.Builder config = config()
+                .setMaxRequestRetry(1)
+                .setRequestTimeout(Duration.ofSeconds(60))
+                .addIOExceptionFilter(replayOnce)
+                .setHttpAdditionalChannelInitializer(clientChannels::add);
+        if (!autoRead) {
+            config.addChannelOption(ChannelOption.AUTO_READ, false);
+        }
+        try (AsyncHttpClient client = asyncHttpClient(config)) {
+            SuspendingHandler handler = new SuspendingHandler();
+            ListenableFuture<Void> response = client.prepareGet(url("/zeros")).execute(handler);
+            assertNotNull(handler.parts.poll(10, SECONDS));
+
+            // Fail the connection only once the body callback and the decompressor's pass have returned, so the
+            // decompressor holds back the rest of the input it has read when the replay completes the old response.
+            Channel first = clientChannels.get(0);
+            first.eventLoop().submit(() -> {
+                first.pipeline().fireExceptionCaught(new IOException("injected"));
+            }).sync();
+            assertTrue(replayed.get());
+
+            while (!handler.last.get()) {
+                assertNotNull(handler.parts.poll(10, SECONDS));
+                handler.control.resume();
+            }
+            response.get(10, SECONDS);
+            assertNull(handler.failure.get());
+
+            List<String> events = handler.events;
+            int retry = events.indexOf("retry");
+            assertEquals("status", events.get(retry + 1),
+                    "after onRetry, the handler must not receive the first response's body: " + events);
+            assertEquals(ZEROS_SIZE, handler.bytes.get() - handler.bytesAtRetry);
+            assertFalse(handler.corrupt.get());
+            assertTrue(first.closeFuture().await(10, SECONDS), "the first connection must be drained and closed");
+        }
+    }
+
+    @Test
     public void compressedResponsesWithoutBodyComplete() throws Exception {
         try (AsyncHttpClient client = asyncHttpClient(config().setMaxConnectionsPerHost(1))) {
             Response head = client.prepareHead(url("/zeros")).execute().get(10, SECONDS);
@@ -336,12 +406,15 @@ public class Http1DecompressionSuspensionTest {
         final AtomicReference<String> trailer = new AtomicReference<>();
         final AtomicReference<Throwable> failure = new AtomicReference<>();
         final ByteArrayOutputStream body = new ByteArrayOutputStream();
+        final List<String> events = new CopyOnWriteArrayList<>();
         volatile ResponseBodyControl control;
+        volatile long bytesAtRetry;
         volatile boolean keepBody;
         volatile boolean abortAfterFirstPart;
 
         @Override
         public State onStatusReceived(HttpResponseStatus responseStatus) {
+            events.add("status");
             return State.CONTINUE;
         }
 
@@ -358,6 +431,7 @@ public class Http1DecompressionSuspensionTest {
 
         @Override
         public State onBodyPartReceived(HttpResponseBodyPart bodyPart) {
+            events.add("part");
             control.suspend();
             byte[] bytes = bodyPart.getBodyPartBytes();
             if (keepBody) {
@@ -383,6 +457,12 @@ public class Http1DecompressionSuspensionTest {
         public State onTrailingHeadersReceived(HttpHeaders headers) {
             trailer.set(last.get() || bytes.get() != TEXT.length ? "early" : headers.get("x-trailer"));
             return State.CONTINUE;
+        }
+
+        @Override
+        public void onRetry() {
+            events.add("retry");
+            bytesAtRetry = bytes.get();
         }
 
         @Override
