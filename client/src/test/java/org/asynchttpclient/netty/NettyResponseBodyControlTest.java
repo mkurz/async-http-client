@@ -18,19 +18,27 @@ package org.asynchttpclient.netty;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
+import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.channel.local.LocalChannel;
 import io.netty.channel.local.LocalIoHandler;
 import org.asynchttpclient.AsyncHandler;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
+import java.util.Queue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static java.util.concurrent.TimeUnit.SECONDS;
@@ -159,6 +167,45 @@ public class NettyResponseBodyControlTest {
         assertFalse(channel.config().isAutoRead());
     }
 
+    @Test
+    public void suspendOnTheEventLoopTakesEffectWhenAResumeClearsTheRequestFirst() {
+        // A resume() from another thread runs exactly when suspend() asks whether it is on the event loop, that is,
+        // after suspend() has recorded its request and before it acts on it.
+        Thread loop = Thread.currentThread();
+        Queue<Runnable> queued = new ConcurrentLinkedQueue<>();
+        AtomicReference<Runnable> onLoopQuery = new AtomicReference<>();
+        InterceptedChannel channel = new InterceptedChannel(loop, queued, onLoopQuery);
+        NettyResponseBodyControl control = NettyResponseBodyControl.create(future, channel,
+                suspensionsStarted::incrementAndGet, suspensionsEnded::incrementAndGet, () -> {
+                }, ignored -> {
+                });
+        try {
+            onLoopQuery.set(() -> {
+                try {
+                    callFromAnotherThread(control::resume);
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            });
+            control.suspend();
+            assertTrue(NettyResponseBodyControl.isSuspended(future), "a suspend() on the event loop must take effect");
+            assertEquals(1, suspensionsStarted.get());
+            assertFalse(channel.config().isAutoRead());
+
+            // The resume from the other thread was queued, and still takes effect afterwards.
+            Runnable task;
+            while ((task = queued.poll()) != null) {
+                task.run();
+            }
+            assertFalse(NettyResponseBodyControl.isSuspended(future));
+            assertEquals(1, suspensionsEnded.get());
+        } finally {
+            onLoopQuery.set(null);
+            NettyResponseBodyControl.complete(future);
+            channel.finishAndReleaseAll();
+        }
+    }
+
     private NettyResponseBodyControl suspendedControl(boolean autoRead) throws Exception {
         return onEventLoop(() -> {
             channel.config().setAutoRead(autoRead);
@@ -182,5 +229,45 @@ public class NettyResponseBodyControlTest {
     // The calling event loop stays busy until the call returns, so the control has to queue the call behind it.
     private static void callFromAnotherThread(Runnable call) throws Exception {
         CompletableFuture.runAsync(call).get(5, SECONDS);
+    }
+
+    /**
+     * An {@link EmbeddedChannel} whose event loop is the given thread. Tasks from other threads are queued, and a hook
+     * runs when the event loop thread asks whether it is on the event loop.
+     */
+    private static final class InterceptedChannel extends EmbeddedChannel {
+
+        private final EventLoop eventLoop;
+
+        InterceptedChannel(Thread loop, Queue<Runnable> queued, AtomicReference<Runnable> onLoopQuery) {
+            EventLoop real = super.eventLoop();
+            eventLoop = (EventLoop) Proxy.newProxyInstance(EventLoop.class.getClassLoader(),
+                    new Class<?>[]{EventLoop.class}, (proxy, method, args) -> {
+                        switch (method.getName()) {
+                            case "inEventLoop":
+                                if (Thread.currentThread() == loop) {
+                                    Runnable hook = onLoopQuery.getAndSet(null);
+                                    if (hook != null) {
+                                        hook.run();
+                                    }
+                                }
+                                return (args == null || args.length == 0 ? Thread.currentThread() : args[0]) == loop;
+                            case "execute":
+                                queued.add((Runnable) args[0]);
+                                return null;
+                            default:
+                                try {
+                                    return method.invoke(real, args);
+                                } catch (InvocationTargetException e) {
+                                    throw e.getCause();
+                                }
+                        }
+                    });
+        }
+
+        @Override
+        public EventLoop eventLoop() {
+            return eventLoop != null ? eventLoop : super.eventLoop();
+        }
     }
 }
