@@ -49,12 +49,10 @@ final class CallerCookies {
      * a stored one stays the caller's. A Cookie header the caller set is not among these; see
      * {@link #headerCookies}.
      */
-    private static List<Cookie> of(Request request, CookieStore cookieStore, Set<String> setByResponse) {
-        List<Cookie> cookies = request.getCookies();
+    private static List<Cookie> of(List<Cookie> cookies, List<Cookie> stored, Set<String> setByResponse) {
         if (cookies.isEmpty()) {
             return cookies;
         }
-        List<Cookie> stored = cookieStore.get(request.getUri());
         List<Cookie> callers = new ArrayList<>(cookies.size());
         for (Cookie cookie : cookies) {
             if (!setByResponse.contains(cookie.name().toLowerCase(Locale.ROOT)) && !holdsSameValue(stored, cookie)) {
@@ -64,7 +62,7 @@ final class CallerCookies {
         return callers;
     }
 
-    private static Set<String> replacedNames(HttpResponse response, CookieStore cookieStore, Uri current, Uri next,
+    private static Set<String> replacedNames(HttpResponse response, List<Cookie> nextCookies, Uri current, Uri next,
                                              ClientCookieDecoder cookieDecoder) {
         // A Set-Cookie replaces the caller's cookie of that name only where its Domain and Path apply, matched as
         // the store matches them, and one that does not delete only if the store now holds its value for the next
@@ -72,7 +70,6 @@ final class CallerCookies {
         // public suffix as Domain, still counts. Names folded as the store keys them, so a SID set here also
         // replaces a request's sid.
         Set<String> setByResponse = new HashSet<>();
-        List<Cookie> nextCookies = null;
         for (String header : response.headers().getAll(SET_COOKIE)) {
             Cookie cookie;
             try {
@@ -94,9 +91,6 @@ final class CallerCookies {
                 }
                 continue;
             }
-            if (nextCookies == null) {
-                nextCookies = cookieStore.get(next);
-            }
             if (appliesTo(cookie, current, next) && holdsSameValue(nextCookies, cookie)) {
                 setByResponse.add(name);
             }
@@ -114,10 +108,15 @@ final class CallerCookies {
 
     static void refresh(RequestBuilder retry, Request request, HttpResponse response, CookieStore cookieStore,
                         Uri next, ClientCookieDecoder cookieDecoder) {
-        Set<String> setByResponse = replacedNames(response, cookieStore, request.getUri(), next, cookieDecoder);
-        retry.setCookies(of(request, cookieStore, setByResponse));
+        List<Cookie> nextCookies = cookieStore.get(next);
+        Set<String> setByResponse = replacedNames(response, nextCookies, request.getUri(), next, cookieDecoder);
+        List<Cookie> cookies = request.getCookies();
+        // A retry goes to the same URI again, so one lookup serves both.
+        List<Cookie> stored = cookies.isEmpty() || next.equals(request.getUri())
+                ? nextCookies : cookieStore.get(request.getUri());
+        retry.setCookies(of(cookies, stored, setByResponse));
         retry.setHeader(COOKIE, headerCookies(request.getHeaders().getAll(COOKIE), setByResponse));
-        for (Cookie cookie : cookieStore.get(next)) {
+        for (Cookie cookie : nextCookies) {
             retry.addCookieIfUnset(cookie);
         }
     }
