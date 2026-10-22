@@ -31,6 +31,8 @@ import java.util.Set;
 
 import static io.netty.handler.codec.http.HttpHeaderNames.COOKIE;
 import static io.netty.handler.codec.http.HttpHeaderNames.SET_COOKIE;
+import static org.asynchttpclient.util.HttpUtils.cookiePairName;
+import static org.asynchttpclient.util.HttpUtils.cookiePairs;
 
 /**
  * Tells the cookies a caller put on a request from the ones the cookie store added, for the request a redirect
@@ -124,44 +126,32 @@ final class CallerCookies {
      * The caller's Cookie header values minus the pairs this response replaced, kept as text: a lenient decode
      * followed by strict encoding can reject a value that was sent on the first attempt.
      * <p>
-     * Every ';' ends a pair, inside quotes too: RFC 6265 does not allow one in a cookie value, and
-     * {@code NettyRequestFactory#mergeCookies} splits the same way when it decides which names the caller set.
-     * Honouring quotes here would let a stray '"' hide a replaced pair in its neighbour's value, to be resent
-     * stale while the merge still counts its name as the caller's and drops the store's new value. Only the
-     * replaced pairs are cut out, so the rest keeps its bytes and a header that loses none is returned as is.
+     * The pairs come from {@code HttpUtils.cookiePairs}, as in {@code NettyRequestFactory#mergeCookies} when it
+     * decides which names the caller set, so every ';' ends one. Honouring quotes here would let a stray '"' hide
+     * a replaced pair in its neighbour's value, to be resent stale while the merge still counts its name as the
+     * caller's and drops the store's new value. Unlike the merge, names are folded as the store folds them, so
+     * replacing SID also cuts a pair named sid. Only the replaced pairs are cut out, so the rest keeps its bytes
+     * and a header that loses none is returned as is.
      */
-    private static List<String> headerCookies(List<String> headers, Set<String> setByResponse) {
-        if (setByResponse.isEmpty() || headers.isEmpty()) {
+    private static List<String> headerCookies(List<String> headers, Set<String> replaced) {
+        if (replaced.isEmpty() || headers.isEmpty()) {
             return headers;
         }
         List<String> remaining = new ArrayList<>(headers.size());
         for (String header : headers) {
+            String[] pairs = cookiePairs(header);
+            if (!anyReplaced(pairs, replaced)) {
+                remaining.add(header);
+                continue;
+            }
             StringBuilder kept = new StringBuilder(header.length());
-            boolean removed = false;
-            int start = 0;
-            while (start <= header.length()) {
-                int end = header.indexOf(';', start);
-                if (end < 0) {
-                    end = header.length();
-                }
-                int nameEnd = start;
-                while (nameEnd < end && header.charAt(nameEnd) != '=') {
-                    nameEnd++;
-                }
-                String name = header.substring(start, nameEnd).trim();
-                if (!name.isEmpty() && setByResponse.contains(name.toLowerCase(Locale.ROOT))) {
-                    removed = true;
-                } else {
+            for (String pair : pairs) {
+                if (!isReplaced(pair, replaced)) {
                     if (kept.length() > 0) {
                         kept.append(';');
                     }
-                    kept.append(header, start, end);
+                    kept.append(pair);
                 }
-                start = end + 1;
-            }
-            if (!removed) {
-                remaining.add(header);
-                continue;
             }
             // Cutting the first or last pair leaves the whitespace or ';' that separated it at that end.
             int from = 0;
@@ -177,6 +167,20 @@ final class CallerCookies {
             }
         }
         return remaining;
+    }
+
+    private static boolean anyReplaced(String[] pairs, Set<String> replaced) {
+        for (String pair : pairs) {
+            if (isReplaced(pair, replaced)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isReplaced(String pair, Set<String> replaced) {
+        String name = cookiePairName(pair);
+        return !name.isEmpty() && replaced.contains(name.toLowerCase(Locale.ROOT));
     }
 
     /**
