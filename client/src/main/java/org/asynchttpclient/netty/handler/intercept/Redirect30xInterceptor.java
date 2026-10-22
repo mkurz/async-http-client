@@ -203,7 +203,8 @@ public class Redirect30xInterceptor {
                             .setRangeOffset(request.getRangeOffset());
                 }
                 // A same-origin hop keeps the caller's cookies but not the store's: those are its values from
-                // before this response and would outrank what it just set. The store adds its current ones below.
+                // before this response and would outrank what it just set. Without a store, every cookie is the
+                // caller's. With one, CallerCookies.refresh tells them apart below and adds the store's current ones.
                 CookieStore cookieStore = config.getCookieStore();
                 if (stripAuth) {
                     requestBuilder.resetCookies();
@@ -214,7 +215,7 @@ public class Redirect30xInterceptor {
                 requestBuilder.setMethod(switchToGet ? GET : originalMethod)
                         .setFollowRedirect(true)
                         .setRealm(stripAuth ? null : request.getRealm())
-                        .setHeaders(propagatedHeaders(request, realm, keepBody, stripAuth, cookieStore != null))
+                        .setHeaders(propagatedHeaders(request, realm, keepBody, stripAuth))
                         .setRequestTimeout(request.getRequestTimeout())
                         .setReadTimeout(request.getReadTimeout());
 
@@ -459,8 +460,8 @@ public class Redirect30xInterceptor {
         NONE
     }
 
-    private static HttpHeaders propagatedHeaders(Request request, Realm realm, boolean keepBody, boolean stripAuthorization,
-                                                 boolean cookiesReconciled) {
+    private static HttpHeaders propagatedHeaders(Request request, Realm realm, boolean keepBody,
+                                                 boolean stripAuthorization) {
         HttpHeaders headers = request.getHeaders().copy().remove(HOST);
 
         // Preserve an explicit length when the selected stream representation cannot rebuild it.
@@ -482,10 +483,6 @@ public class Redirect30xInterceptor {
                 || realm.getScheme() == AuthScheme.SCRAM_SHA_256)) {
             headers.remove(AUTHORIZATION)
                     .remove(PROXY_AUTHORIZATION);
-        }
-        if (cookiesReconciled) {
-            // Unless stripped above, CallerCookies.refresh puts it back minus the pairs this response replaced.
-            headers.remove(COOKIE);
         }
         return headers;
     }
