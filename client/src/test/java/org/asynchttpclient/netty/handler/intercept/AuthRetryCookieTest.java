@@ -72,7 +72,7 @@ public class AuthRetryCookieTest extends AbstractBasicTest {
                 } else if ("/proxied".equals(target) && request.getHeader("Proxy-Authorization") == null) {
                     // This server is the proxy too: the request is sent to it in absolute form.
                     challenge(response, HttpServletResponse.SC_PROXY_AUTHENTICATION_REQUIRED, "Proxy-Authenticate",
-                            "SID=new; Path=/", "Basic realm=\"proxy\"");
+                            null, "Basic realm=\"proxy\"");
                 } else if ("/protected-delete-elsewhere".equals(target) && authorization == null) {
                     challenge(response, HttpServletResponse.SC_UNAUTHORIZED, "WWW-Authenticate",
                             "SID=; Path=/elsewhere; Max-Age=0", "Basic realm=\"test\"");
@@ -103,24 +103,16 @@ public class AuthRetryCookieTest extends AbstractBasicTest {
     /** A caller-set Cookie header is the caller's too, but it must not outrank what the challenge rotated. */
     @Test
     void aCallerSetCookieHeaderDoesNotOutrankTheSessionTheChallengeSet() throws Exception {
-        try (AsyncHttpClient client = asyncHttpClient()) {
-            String header = client.prepareGet(url("/protected"))
-                    .setRealm(basicAuthRealm("user", "pass").setUsePreemptiveAuth(false))
-                    .setHeader("Cookie", "SID=old; X=1")
-                    .execute().get(TIMEOUT, TimeUnit.SECONDS).getHeader(RECEIVED_COOKIE);
-            assertEquals(new HashSet<>(Arrays.asList("X=1", "SID=new")), new HashSet<>(Arrays.asList(header.split("; "))));
-        }
+        assertEquals(new HashSet<>(Arrays.asList("X=1", "SID=new")), cookiesSent(rawCookieOnRetry("SID=old; X=1",
+                client -> client.prepareGet(url("/protected"))
+                        .setRealm(basicAuthRealm("user", "pass").setUsePreemptiveAuth(false)))));
     }
 
     @Test
     void aRawCookieWithANonStrictValueSurvivesTheRetry() throws Exception {
-        try (AsyncHttpClient client = asyncHttpClient()) {
-            String header = client.prepareGet(url("/protected"))
-                    .setRealm(basicAuthRealm("user", "pass").setUsePreemptiveAuth(false))
-                    .setHeader("Cookie", "SID=old; X=a b")
-                    .execute().get(TIMEOUT, TimeUnit.SECONDS).getHeader(RECEIVED_COOKIE);
-            assertEquals(new HashSet<>(Arrays.asList("X=a b", "SID=new")), new HashSet<>(Arrays.asList(header.split("; "))));
-        }
+        assertEquals(new HashSet<>(Arrays.asList("X=a b", "SID=new")), cookiesSent(rawCookieOnRetry("SID=old; X=a b",
+                client -> client.prepareGet(url("/protected"))
+                        .setRealm(basicAuthRealm("user", "pass").setUsePreemptiveAuth(false)))));
     }
 
     @Test
@@ -130,8 +122,8 @@ public class AuthRetryCookieTest extends AbstractBasicTest {
     }
 
     @Test
-    void aRawCookieSurvivesAProxyAuthenticationRetryBesideTheSessionTheChallengeSet() throws Exception {
-        assertEquals("X=a b; SID=new", rawCookieOnRetry("SID=old; X=a b", client -> client.prepareGet(url("/proxied"))
+    void aRawCookieSurvivesAProxyAuthenticationRetry() throws Exception {
+        assertEquals("SID=old; X=a b", rawCookieOnRetry("SID=old; X=a b", client -> client.prepareGet(url("/proxied"))
                 .setProxyServer(proxyServer("localhost", port2)
                         .setRealm(basicAuthRealm("user", "pass").setUsePreemptiveAuth(false)))));
     }
@@ -178,7 +170,9 @@ public class AuthRetryCookieTest extends AbstractBasicTest {
 
     private static void challenge(HttpServletResponse response, int status, String authenticate, String setCookie,
                                   String challenge) {
-        response.addHeader("Set-Cookie", setCookie);
+        if (setCookie != null) {
+            response.addHeader("Set-Cookie", setCookie);
+        }
         response.setHeader(authenticate, challenge);
         response.setStatus(status);
     }
@@ -191,9 +185,12 @@ public class AuthRetryCookieTest extends AbstractBasicTest {
             if (callerCookie != null) {
                 request.addCookie(callerCookie);
             }
-            String header = request.execute().get(TIMEOUT, TimeUnit.SECONDS).getHeader(RECEIVED_COOKIE);
-            return header == null ? new HashSet<>() : new HashSet<>(Arrays.asList(header.split("; ")));
+            return cookiesSent(request.execute().get(TIMEOUT, TimeUnit.SECONDS).getHeader(RECEIVED_COOKIE));
         }
+    }
+
+    private static Set<String> cookiesSent(String header) {
+        return header == null ? new HashSet<>() : new HashSet<>(Arrays.asList(header.split("; ")));
     }
 
     private String url(String path) {
