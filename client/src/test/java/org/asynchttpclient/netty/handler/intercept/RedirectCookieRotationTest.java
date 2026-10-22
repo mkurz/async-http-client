@@ -90,6 +90,22 @@ public class RedirectCookieRotationTest extends AbstractBasicTest {
                     case "/other-path":
                         redirect(response, HttpServletResponse.SC_FOUND, "SID=other; Path=/elsewhere", "/home");
                         break;
+                    case "/other-path-same-value":
+                        redirect(response, HttpServletResponse.SC_FOUND, "SID=old; Path=/elsewhere", "/home");
+                        break;
+                    case "/reject-domain-delete":
+                        redirect(response, HttpServletResponse.SC_FOUND, "SID=; Domain=example.org; Path=/; Max-Age=0",
+                                "/home");
+                        break;
+                    case "/other-path-delete":
+                        redirect(response, HttpServletResponse.SC_FOUND, "SID=; Path=/elsewhere; Max-Age=0", "/home");
+                        break;
+                    case "/seed-root-p":
+                        response.addHeader("Set-Cookie", "P=root; Path=/");
+                        break;
+                    case "/p/logout":
+                        redirect(response, HttpServletResponse.SC_FOUND, "P=; Path=/p; Max-Age=0", "/home");
+                        break;
                     case "/rotate-lower":
                         redirect(response, HttpServletResponse.SC_FOUND, "sid=new; Path=/", "/home");
                         break;
@@ -331,6 +347,40 @@ public class RedirectCookieRotationTest extends AbstractBasicTest {
                 "refused: Domain does not match");
         assertEquals("SID=mine", withCallerCookie("SID", "mine", client -> client.prepareGet(url("/other-path"))),
                 "stored for /elsewhere, not sent to /home");
+        assertEquals("SID=mine", withCallerCookie("SID", "mine",
+                client -> client.prepareGet(url("/other-path-same-value"))),
+                "stored for /elsewhere, with the value of the stored cookie sent to /home");
+    }
+
+    /** Nor does a deletion the store refused or that applies elsewhere, or the stored value takes its place. */
+    @Test
+    void aDeletionThatDoesNotReachTheNextHopLeavesTheCallersCookie() throws Exception {
+        for (String path : Arrays.asList("/reject-domain-delete", "/other-path-delete")) {
+            assertEquals("SID=mine", withCallerCookie("SID", "mine", client -> client.prepareGet(url(path))), path);
+            assertEquals("SID=mine", withRawCookieAfterSeeding("SID=mine", client -> client.prepareGet(url(path))),
+                    path + ", Cookie header");
+        }
+        assertEquals("SID=mine", withRawCookie("SID=mine", client -> client.prepareGet(url("/other-path-delete"))),
+                "nothing stored");
+    }
+
+    /**
+     * A deletion that applies only to the request it answered still removes the cookie sent with that request, from
+     * the store or the caller's header, so it does not follow the redirect.
+     */
+    @Test
+    void aCookieDeletedForThePathItWasSentToDoesNotFollowTheRedirect() throws Exception {
+        assertEquals("SID=old", afterSeeding(client -> client.prepareGet(url("/p/logout"))), "cookie object");
+        assertEquals("SID=old", withRawCookieAfterSeeding("P=scoped", client -> client.prepareGet(url("/p/logout"))),
+                "Cookie header");
+    }
+
+    /** A stored cookie of that name for the next hop still follows, as it would without the caller's header. */
+    @Test
+    void aCookieDeletedForThePathItWasSentToLeavesTheOneStoredForTheNextHop() throws Exception {
+        Set<String> expected = new HashSet<>(Arrays.asList("SID=old", "P=root"));
+        assertEquals(expected, cookiesSent(logoutBesideARootCookie(null)), "cookie object");
+        assertEquals(expected, cookiesSent(logoutBesideARootCookie("P=scoped")), "Cookie header");
     }
 
     // Without a cookie store every cookie on the request is the caller's own.
@@ -365,6 +415,27 @@ public class RedirectCookieRotationTest extends AbstractBasicTest {
     private String withRawCookie(String header, Function<AsyncHttpClient, BoundRequestBuilder> request)
             throws Exception {
         try (AsyncHttpClient client = asyncHttpClient(config().setFollowRedirect(true))) {
+            return request.apply(client).setHeader("Cookie", header)
+                    .execute().get(TIMEOUT, TimeUnit.SECONDS).getHeader(RECEIVED_COOKIE);
+        }
+    }
+
+    private String logoutBesideARootCookie(String cookieHeader) throws Exception {
+        try (AsyncHttpClient client = asyncHttpClient(config().setFollowRedirect(true))) {
+            client.prepareGet(url("/seed")).execute().get(TIMEOUT, TimeUnit.SECONDS);
+            client.prepareGet(url("/seed-root-p")).execute().get(TIMEOUT, TimeUnit.SECONDS);
+            BoundRequestBuilder logout = client.prepareGet(url("/p/logout"));
+            if (cookieHeader != null) {
+                logout.setHeader("Cookie", cookieHeader);
+            }
+            return logout.execute().get(TIMEOUT, TimeUnit.SECONDS).getHeader(RECEIVED_COOKIE);
+        }
+    }
+
+    private String withRawCookieAfterSeeding(String header, Function<AsyncHttpClient, BoundRequestBuilder> request)
+            throws Exception {
+        try (AsyncHttpClient client = asyncHttpClient(config().setFollowRedirect(true))) {
+            client.prepareGet(url("/seed")).execute().get(TIMEOUT, TimeUnit.SECONDS);
             return request.apply(client).setHeader("Cookie", header)
                     .execute().get(TIMEOUT, TimeUnit.SECONDS).getHeader(RECEIVED_COOKIE);
         }

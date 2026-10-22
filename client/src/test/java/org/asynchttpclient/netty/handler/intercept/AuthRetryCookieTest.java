@@ -73,6 +73,9 @@ public class AuthRetryCookieTest extends AbstractBasicTest {
                     // This server is the proxy too: the request is sent to it in absolute form.
                     challenge(response, HttpServletResponse.SC_PROXY_AUTHENTICATION_REQUIRED, "Proxy-Authenticate",
                             "SID=new; Path=/", "Basic realm=\"proxy\"");
+                } else if ("/protected-delete-elsewhere".equals(target) && authorization == null) {
+                    challenge(response, HttpServletResponse.SC_UNAUTHORIZED, "WWW-Authenticate",
+                            "SID=; Path=/elsewhere; Max-Age=0", "Basic realm=\"test\"");
                 } else if ("/protected".equals(target) && authorization == null) {
                     challenge(response, HttpServletResponse.SC_UNAUTHORIZED, "WWW-Authenticate", "SID=new; Path=/",
                             "Basic realm=\"test\"");
@@ -147,6 +150,22 @@ public class AuthRetryCookieTest extends AbstractBasicTest {
                 .setRealm(basicAuthRealm("user", "pass").setUsePreemptiveAuth(false))));
         assertEquals("X=a\"b; SID=new", rawCookieOnRetry("X=a\"b; SID=old", client -> client.prepareGet(url("/digest"))
                 .setRealm(digestAuthRealm("user", "pass").setUsePreemptiveAuth(false))));
+    }
+
+    /** A deletion for another path leaves the store's cookie of that name, which must not replace the caller's. */
+    @Test
+    void aDeletionForAnotherPathLeavesTheCallersCookieOnTheRetry() throws Exception {
+        try (AsyncHttpClient client = asyncHttpClient()) {
+            client.prepareGet(url("/seed")).execute().get(TIMEOUT, TimeUnit.SECONDS);
+            assertEquals("SID=mine", client.prepareGet(url("/protected-delete-elsewhere"))
+                    .setRealm(basicAuthRealm("user", "pass").setUsePreemptiveAuth(false))
+                    .setHeader("Cookie", "SID=mine")
+                    .execute().get(TIMEOUT, TimeUnit.SECONDS).getHeader(RECEIVED_COOKIE), "Cookie header");
+            assertEquals("SID=mine", client.prepareGet(url("/protected-delete-elsewhere"))
+                    .setRealm(basicAuthRealm("user", "pass").setUsePreemptiveAuth(false))
+                    .addCookie(new DefaultCookie("SID", "mine"))
+                    .execute().get(TIMEOUT, TimeUnit.SECONDS).getHeader(RECEIVED_COOKIE), "cookie object");
+        }
     }
 
     private static String rawCookieOnRetry(String header, Function<AsyncHttpClient, BoundRequestBuilder> request)

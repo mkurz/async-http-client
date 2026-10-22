@@ -62,10 +62,12 @@ final class CallerCookies {
         return callers;
     }
 
-    private static Set<String> replacedNames(HttpResponse response, CookieStore cookieStore, Uri next,
+    private static Set<String> replacedNames(HttpResponse response, CookieStore cookieStore, Uri current, Uri next,
                                              ClientCookieDecoder cookieDecoder) {
-        // Only what the store took counts: a Set-Cookie it refused, or one for another path, leaves the
-        // caller's cookie of that name in place. Names folded as the store keys them, so a SID set here also
+        // A Set-Cookie replaces the caller's cookie of that name only where its Domain and Path apply, matched as
+        // the store matches them, and one that does not delete only if the store now holds its value for the next
+        // request. The store's other checks are not repeated: a deletion it refuses for another reason, such as a
+        // public suffix as Domain, still counts. Names folded as the store keys them, so a SID set here also
         // replaces a request's sid.
         Set<String> setByResponse = new HashSet<>();
         List<Cookie> nextCookies = null;
@@ -80,15 +82,21 @@ final class CallerCookies {
             if (cookie == null) {
                 continue;
             }
+            String name = cookie.name().toLowerCase(Locale.ROOT);
             if (cookie.maxAge() != Cookie.UNDEFINED_MAX_AGE && cookie.maxAge() <= 0) {
-                setByResponse.add(cookie.name().toLowerCase(Locale.ROOT));
+                // A deletion also counts if it applies only to the request it answered. The cookie it deleted
+                // there was sent with that request: once gone from the store, it can no longer be told from
+                // the caller's, and a caller's pair may be a copy of it.
+                if (appliesTo(cookie, current, current) || appliesTo(cookie, current, next)) {
+                    setByResponse.add(name);
+                }
                 continue;
             }
             if (nextCookies == null) {
                 nextCookies = cookieStore.get(next);
             }
-            if (holdsSameValue(nextCookies, cookie)) {
-                setByResponse.add(cookie.name().toLowerCase(Locale.ROOT));
+            if (appliesTo(cookie, current, next) && holdsSameValue(nextCookies, cookie)) {
+                setByResponse.add(name);
             }
         }
         return setByResponse;
@@ -104,7 +112,7 @@ final class CallerCookies {
 
     static void refresh(RequestBuilder retry, Request request, HttpResponse response, CookieStore cookieStore,
                         Uri next, ClientCookieDecoder cookieDecoder) {
-        Set<String> setByResponse = replacedNames(response, cookieStore, next, cookieDecoder);
+        Set<String> setByResponse = replacedNames(response, cookieStore, request.getUri(), next, cookieDecoder);
         retry.setCookies(of(request, cookieStore, setByResponse));
         retry.setHeader(COOKIE, headerCookies(request.getHeaders().getAll(COOKIE), setByResponse));
         for (Cookie cookie : cookieStore.get(next)) {
@@ -169,6 +177,42 @@ final class CallerCookies {
             }
         }
         return remaining;
+    }
+
+    /**
+     * Whether the Domain and Path of a cookie in the response to {@code answered} match {@code uri}, as the store
+     * matches them (RFC 6265 sections 5.1.3 and 5.1.4). Only for a {@code uri} on the same host, the only kind a
+     * retry or a redirect that keeps the caller's cookies goes to.
+     */
+    private static boolean appliesTo(Cookie cookie, Uri answered, Uri uri) {
+        String domain = cookie.domain() == null ? "" : canonicalHost(cookie.domain());
+        if (domain.startsWith(".")) {
+            domain = domain.substring(1);
+        }
+        if (!domain.isEmpty()) {
+            String host = canonicalHost(uri.getHost());
+            if (!host.equals(domain) && !host.endsWith('.' + domain)) {
+                return false;
+            }
+        }
+        String path = cookie.path();
+        if (path == null || path.isEmpty() || path.charAt(0) != '/') {
+            String answeredPath = answered.getPath();
+            int lastSlash = answeredPath.lastIndexOf('/');
+            path = answeredPath.startsWith("/") && lastSlash > 0 ? answeredPath.substring(0, lastSlash) : "/";
+        }
+        String uriPath = uri.getPath().isEmpty() ? "/" : uri.getPath();
+        return uriPath.startsWith(path) && (uriPath.length() == path.length()
+                || path.charAt(path.length() - 1) == '/' || uriPath.charAt(path.length()) == '/');
+    }
+
+    private static String canonicalHost(String host) {
+        String lowered = host.toLowerCase(Locale.ROOT);
+        int end = lowered.length();
+        while (end > 0 && lowered.charAt(end - 1) == '.') {
+            end--;
+        }
+        return lowered.substring(0, end);
     }
 
     private static boolean holdsSameValue(List<Cookie> stored, Cookie cookie) {
