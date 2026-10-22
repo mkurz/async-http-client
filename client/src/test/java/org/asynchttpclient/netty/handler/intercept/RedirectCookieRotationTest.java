@@ -158,6 +158,13 @@ public class RedirectCookieRotationTest extends AbstractBasicTest {
         assertFalse(received != null && received.contains("P="), "sent to /q/b: " + received);
     }
 
+    /** A Cookie header pair is the caller's even when the store holds the same cookie, so it may leave its path. */
+    @Test
+    void aRawPairEqualToAStoredCookieFollowsARedirectOutOfItsPath() throws Exception {
+        assertEquals(new HashSet<>(Arrays.asList("P=scoped", "SID=old")),
+                cookiesSent(withRawCookieAfterSeeding("P=scoped", client -> client.prepareGet(url("/p/a")))));
+    }
+
     /** The store folds cookie names, so a redirect naming SID as sid still replaces it. */
     @Test
     void aRedirectReplacesACookieItNamesInAnotherCase() throws Exception {
