@@ -15,6 +15,8 @@
  */
 package org.asynchttpclient;
 
+import java.util.Objects;
+
 /**
  * Controls transport reads for a response body.
  * <p>
@@ -96,12 +98,15 @@ public interface ResponseBodyControl {
      * suspended indefinitely, since the read timeout is paused while reads are suspended.
      * <p>
      * The default implementation runs the task on the calling thread. That suits implementations that apply control
-     * calls synchronously on the calling thread; it does not order the task with callbacks made on other threads.
+     * calls synchronously on the calling thread; it does not order the task with callbacks made on other threads. An
+     * implementation that delegates to another control must delegate this method too, or the task loses the ordering
+     * that control provides.
      *
      * @param task the task to run
      * @since 3.0.15
      */
     default void execute(Runnable task) {
+        Objects.requireNonNull(task, "task");
         task.run();
     }
 }

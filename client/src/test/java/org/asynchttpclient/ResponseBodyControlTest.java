@@ -780,7 +780,21 @@ public class ResponseBodyControlTest {
 
     @Test
     public void defaultExecuteRunsTheTaskOnTheCallingThread() {
-        ResponseBodyControl control = new ResponseBodyControl() {
+        AtomicReference<Thread> taskThread = new AtomicReference<>();
+
+        synchronousControl().execute(() -> taskThread.set(Thread.currentThread()));
+        assertSame(Thread.currentThread(), taskThread.get());
+    }
+
+    @Test
+    public void defaultExecuteNamesAMissingTask() {
+        NullPointerException missingTask =
+                assertThrows(NullPointerException.class, () -> synchronousControl().execute(null));
+        assertEquals("task", missingTask.getMessage());
+    }
+
+    private static ResponseBodyControl synchronousControl() {
+        return new ResponseBodyControl() {
             @Override
             public void suspend() {
             }
@@ -793,10 +807,6 @@ public class ResponseBodyControlTest {
             public void cancel() {
             }
         };
-        AtomicReference<Thread> taskThread = new AtomicReference<>();
-
-        control.execute(() -> taskThread.set(Thread.currentThread()));
-        assertSame(Thread.currentThread(), taskThread.get());
     }
 
     private static void runOnAnotherThread(Runnable action) {
