@@ -89,6 +89,12 @@ public interface ResponseBodyControl {
      * The task can run on a transport thread and must not block. It also runs after the response has completed. If the
      * event loop no longer accepts tasks, for example because it is shutting down, the task does not run.
      * <p>
+     * The task must not throw. An exception from a task that runs before this method returns is thrown from this
+     * method, so a callback that lets it propagate fails the response. An exception from a queued task is logged by the
+     * event loop and does not fail the response. If that task was to resume reads, the response stays suspended until
+     * it is resumed or cancelled, or the request timeout fires. With the request timeout disabled, it can stay
+     * suspended indefinitely, since the read timeout is paused while reads are suspended.
+     * <p>
      * The default implementation runs the task on the calling thread. That suits implementations that apply control
      * calls synchronously on the calling thread; it does not order the task with callbacks made on other threads.
      *

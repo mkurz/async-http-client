@@ -681,6 +681,104 @@ public class ResponseBodyControlTest {
     }
 
     @Test
+    public void aQueuedTaskThatThrowsDoesNotFailTheResponse() throws Exception {
+        AtomicReference<Channel> clientChannel = new AtomicReference<>();
+        try (AsyncHttpClient client = asyncHttpClient(config()
+                .setMaxConnectionsPerHost(1)
+                .setRequestTimeout(Duration.ofSeconds(10))
+                .setHttpAdditionalChannelInitializer(clientChannel::set))) {
+            RecordingHandler handler = new RecordingHandler(false);
+            ListenableFuture<RecordingHandler> request = client.prepareGet(url("/controlled")).execute(handler);
+            ResponseBodyControl control = handler.control.get(5, SECONDS);
+            ChannelHandlerContext server = responseContext.get(5, SECONDS);
+
+            CountDownLatch ran = new CountDownLatch(1);
+            control.execute(() -> {
+                ran.countDown();
+                throw new IllegalStateException("task failed");
+            });
+            assertTrue(ran.await(5, SECONDS));
+            awaitEventLoop(clientChannel.get());
+            assertFalse(request.isDone(), "a queued task that throws must not fail the response");
+            assertFalse(clientChannel.get().config().isAutoRead(), "the response must stay suspended");
+
+            control.execute(control::resume);
+            writeChunk(server, "one");
+            assertEquals("one", handler.items.poll(5, SECONDS));
+            writeLast(server);
+            assertSame(handler, request.get(5, SECONDS));
+            assertNull(handler.throwable.get());
+
+            Response pooled = client.prepareGet(url("/pool")).execute().get(5, SECONDS);
+            assertEquals("1", pooled.getResponseBody());
+            assertEquals(1, connectionCount.get(), "the connection must be reused");
+        }
+    }
+
+    @Test
+    public void aQueuedTaskThatThrowsAfterTheResponseCompletedLeavesItsConnectionPooled() throws Exception {
+        AtomicReference<Channel> clientChannel = new AtomicReference<>();
+        try (AsyncHttpClient client = asyncHttpClient(config()
+                .setMaxConnectionsPerHost(1)
+                .setRequestTimeout(Duration.ofSeconds(10))
+                .setHttpAdditionalChannelInitializer(clientChannel::set))) {
+            RecordingHandler handler = new RecordingHandler(false);
+            ListenableFuture<RecordingHandler> request = client.prepareGet(url("/controlled")).execute(handler);
+            ResponseBodyControl control = handler.control.get(5, SECONDS);
+            ChannelHandlerContext server = responseContext.get(5, SECONDS);
+            control.resume();
+            writeLast(server);
+            assertSame(handler, request.get(5, SECONDS));
+
+            CountDownLatch ran = new CountDownLatch(1);
+            control.execute(() -> {
+                ran.countDown();
+                throw new IllegalStateException("task failed after completion");
+            });
+            assertTrue(ran.await(5, SECONDS));
+            awaitEventLoop(clientChannel.get());
+
+            assertTrue(clientChannel.get().isActive(), "the pooled connection must stay open");
+            Response pooled = client.prepareGet(url("/pool")).execute().get(5, SECONDS);
+            assertEquals("1", pooled.getResponseBody());
+            assertEquals(1, connectionCount.get());
+            assertNull(handler.throwable.get());
+        }
+    }
+
+    @Test
+    public void anExceptionFromATaskRunOnTheEventLoopIsThrownFromExecute() throws Exception {
+        IllegalStateException failure = new IllegalStateException("task failed");
+        CompletableFuture<Throwable> thrownFromExecute = new CompletableFuture<>();
+        try (AsyncHttpClient client = asyncHttpClient(config().setRequestTimeout(Duration.ofSeconds(10)))) {
+            RecordingHandler handler = new RecordingHandler(false) {
+                @Override
+                public State onBodyPartReceived(HttpResponseBodyPart bodyPart) throws IOException {
+                    try {
+                        super.responseBodyControl.execute(() -> {
+                            throw failure;
+                        });
+                    } catch (IllegalStateException e) {
+                        thrownFromExecute.complete(e);
+                    }
+                    return super.onBodyPartReceived(bodyPart);
+                }
+            };
+            ListenableFuture<RecordingHandler> request = client.prepareGet(url("/controlled")).execute(handler);
+            ResponseBodyControl control = handler.control.get(5, SECONDS);
+            ChannelHandlerContext server = responseContext.get(5, SECONDS);
+            control.resume();
+            writeChunk(server, "one");
+            writeLast(server);
+
+            assertSame(handler, request.get(5, SECONDS));
+            assertSame(failure, thrownFromExecute.get(5, SECONDS));
+            assertEquals("one", handler.items.poll(5, SECONDS));
+            assertNull(handler.throwable.get());
+        }
+    }
+
+    @Test
     public void defaultExecuteRunsTheTaskOnTheCallingThread() {
         ResponseBodyControl control = new ResponseBodyControl() {
             @Override

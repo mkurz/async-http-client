@@ -316,6 +316,25 @@ public class Http2ResponseBodyControlTest {
         }
     }
 
+    @Test
+    public void aQueuedTaskThatThrowsDoesNotFailTheHttp2Stream() throws Exception {
+        try (AsyncHttpClient client = http2Client()) {
+            RecordingHandler handler = new RecordingHandler();
+            ListenableFuture<RecordingHandler> request = client.prepareGet(url("/large")).execute(handler);
+            ResponseBodyControl control = handler.control.get(5, SECONDS);
+            assertTrue(largeResponseQueued.await(5, SECONDS));
+
+            control.execute(() -> {
+                throw new IllegalStateException("task failed");
+            });
+            control.execute(control::resume);
+
+            assertSame(handler, request.get(10, SECONDS));
+            assertEquals((long) FRAME_SIZE * FRAME_COUNT, handler.bodyBytes.get());
+            assertNull(handler.throwable.get());
+        }
+    }
+
     private AsyncHttpClient http2Client() {
         return asyncHttpClient(config()
                 .setUseInsecureTrustManager(true)
