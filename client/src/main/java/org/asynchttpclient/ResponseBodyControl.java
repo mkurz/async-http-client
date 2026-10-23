@@ -69,9 +69,11 @@ public interface ResponseBodyControl {
      * <p>
      * Called on that event loop, for example from one of those callbacks, the task runs before this method returns.
      * Called from any other thread, the task is queued to the event loop and runs there after the work already pending
-     * on it; the event loop can deliver further body parts before the task runs. Either way, {@link #suspend()},
-     * {@link #resume()} and {@link #cancel()} called from the task take effect immediately, and the task sees every
-     * body part delivered before it runs.
+     * on it; the event loop can deliver further body parts before the task runs. Either way, the task sees every body
+     * part delivered before it runs, and {@link #suspend()}, {@link #resume()} and {@link #cancel()} called from the
+     * task are applied before they return, not queued. As {@link #suspend()} says, parts that were already read can
+     * still be delivered after it. {@link #resume()} can deliver parts, and {@link #resume()} and {@link #cancel()}
+     * can complete the response, before they return.
      * <p>
      * {@link AsyncHandler#onThrowable(Throwable)} runs once the control is inactive, so control calls from a task
      * passed to this method from there have no effect. It runs on the thread that fails the response. For most
