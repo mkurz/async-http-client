@@ -68,7 +68,6 @@ import static org.asynchttpclient.Dsl.asyncHttpClient;
 import static org.asynchttpclient.Dsl.config;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -309,7 +308,7 @@ public class Http2ResponseBodyControlTest {
             });
 
             assertSame(handler, request.get(10, SECONDS));
-            assertNotSame(Thread.currentThread(), taskThread.get(5, SECONDS),
+            assertSame(handler.bodyPartThread.get(), taskThread.get(5, SECONDS),
                     "a task from another thread must run on the stream's event loop");
             assertEquals((long) FRAME_SIZE * FRAME_COUNT, handler.bodyBytes.get());
             assertNull(handler.throwable.get());
@@ -422,6 +421,7 @@ public class Http2ResponseBodyControlTest {
         private final AtomicInteger protocolMajorVersion = new AtomicInteger();
         private final AtomicReference<Throwable> throwable = new AtomicReference<>();
         private final CompletableFuture<Void> firstBodyPart = new CompletableFuture<>();
+        private final AtomicReference<Thread> bodyPartThread = new AtomicReference<>();
         private final AtomicInteger completionCount = new AtomicInteger();
         private final boolean suspendEveryPart;
         private final boolean cancelOnBodyPart;
@@ -461,6 +461,7 @@ public class Http2ResponseBodyControlTest {
 
         @Override
         public State onBodyPartReceived(HttpResponseBodyPart bodyPart) {
+            bodyPartThread.set(Thread.currentThread());
             byte[] bytes = bodyPart.getBodyPartBytes();
             bodyBytes.addAndGet(bytes.length);
             if (bytes.length > 0) {
