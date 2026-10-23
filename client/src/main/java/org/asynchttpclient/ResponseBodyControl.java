@@ -73,9 +73,12 @@ public interface ResponseBodyControl {
      * {@link #resume()} and {@link #cancel()} called from the task take effect immediately, and the task sees every
      * body part delivered before it runs.
      * <p>
-     * Not every callback runs on that event loop. {@link AsyncHandler#onThrowable(Throwable)} can run on the thread
-     * that cancels the request, or on a timer thread when a timeout fires. A task passed to this method from there is
-     * queued like one from any other thread, and can run while that callback is still running.
+     * {@link AsyncHandler#onThrowable(Throwable)} runs once the control is inactive, so control calls from a task
+     * passed to this method from there have no effect. It runs on the thread that fails the response. For most
+     * failures, such as an I/O error, a closed connection or a reset stream, that is this event loop, and the task runs
+     * before this method returns. A cancel or abort from another thread calls it on that thread, and a timeout on the
+     * client's timer thread unless {@link AsyncHttpClientConfig#isUseEventLoopTimeouts()} is enabled; from there, the
+     * task is queued, and can run while that callback is still running.
      * <p>
      * This lets a consumer that buffers body parts on another thread decide whether to resume reads based on everything
      * delivered so far. Calling {@link #resume()} directly from that thread instead acts on a decision that a body part
